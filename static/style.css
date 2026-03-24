@@ -535,7 +535,27 @@ body {
 
 .remote-viewer .xterm {
     width: 100%;
-    height: 100%;
+    height: calc(100% - 36px);
+}
+
+.remote-actions {
+    padding: 4px 8px;
+    display: flex;
+    gap: 8px;
+}
+
+.open-local-btn {
+    background: #238636;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 12px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.open-local-btn:hover {
+    background: #2ea043;
 }
 
 /* ---------------------------------------------------------------------------

@@ -580,25 +580,22 @@ function attemptReconnect(tid) {
                 return;
             }
 
-            // Server is back — reconnect WebSocket
+            // Server is back — clean reconnect, Claude --resume handles context
             const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
-            const newWs = new WebSocket(`${wsProto}//${location.host}/ws/terminal/${tid}`);
+            const newWs = new WebSocket(`${wsProto}//${location.host}/ws/terminal/${tid}?replay=0`);
+
+            newWs.onmessage = (event) => {
+                t.term.write(event.data);
+            };
 
             newWs.onopen = () => {
-                // Clear terminal and let scrollback replay from server
-                t.term.clear();
-                t.term.write("\x1b[2J\x1b[H"); // full clear
+                t.term.reset();
                 t.ws = newWs;
-                t.term.write("\x1b[32m[reconnected]\x1b[0m\r\n");
                 setTimeout(() => {
                     t.fitAddon.fit();
                     const { cols, rows } = t.term;
                     newWs.send(JSON.stringify({ type: "resize", cols, rows }));
                 }, 100);
-            };
-
-            newWs.onmessage = (event) => {
-                t.term.write(event.data);
             };
 
             newWs.onclose = () => {
@@ -837,12 +834,46 @@ async function viewRemoteTerminal(tid, machineId, remoteId) {
         term.write("\x1b[31m[Failed to load scrollback]\x1b[0m\r\n");
     }
 
+    // "Open locally" button
+    const info = remoteTerminals.find(t => t.tid === tid && t.machine_id === machineId);
+    const btnBar = document.createElement("div");
+    btnBar.className = "remote-actions";
+    btnBar.innerHTML = `<button class="open-local-btn">${info?.has_summary ? "Open locally (with context)" : "Open locally"}</button>`;
+    viewerEl.insertBefore(btnBar, viewerEl.firstChild);
+
+    btnBar.querySelector(".open-local-btn").addEventListener("click", async () => {
+        if (!info) return;
+        // Map remote cwd to local path (same project name, different base path)
+        const projectName = info.cwd.split(/[\\/]/).pop();
+        const resp = await fetch("/api/terminals", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                cwd: info.cwd,  // Will need to be adjusted for different machines
+                launch_claude: true,
+                label: info.label || projectName,
+            }),
+        });
+        const result = await resp.json();
+        if (result.ok) {
+            connectTerminal(result.terminal_id, result.label, info.cwd);
+            // If there's a compact summary, paste it after Claude starts
+            if (info.compact_summary) {
+                setTimeout(() => {
+                    const t = terminals[result.terminal_id];
+                    if (t && t.ws && t.ws.readyState === WebSocket.OPEN) {
+                        const contextPrompt = `Here is context from my previous session on another machine. Use this to understand what I was working on:\n\n${info.compact_summary}`;
+                        t.ws.send(JSON.stringify({ type: "input", data: contextPrompt + "\n" }));
+                    }
+                }, 5000); // Wait for Claude to fully start
+            }
+        }
+    });
+
     // Store for cleanup
     viewerEl._term = term;
     viewerEl._fitAddon = fitAddon;
 
-    // Find remote terminal info for path bar
-    const info = remoteTerminals.find(t => t.tid === tid && t.machine_id === machineId);
     if (pathBar && info) pathBar.textContent = `${info.hostname}: ${info.cwd}`;
 }
 

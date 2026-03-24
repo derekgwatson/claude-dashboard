@@ -110,6 +110,16 @@ def _push():
             except OSError:
                 pass
 
+        # Extract compact summary from transcript if available
+        compact_summary = ""
+        transcript_path = row["transcript_path"] if "transcript_path" in row.keys() else ""
+        if transcript_path:
+            try:
+                from app import extract_compact_summary
+                compact_summary = extract_compact_summary(transcript_path)
+            except Exception:
+                pass
+
         term_list.append({
             "tid": tid,
             "label": row["label"],
@@ -120,6 +130,7 @@ def _push():
             "created_at": row["created_at"],
             "updated_at": time.time(),
             "scrollback": scrollback_b64,
+            "compact_summary": compact_summary,
         })
 
     payload = {

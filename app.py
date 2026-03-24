@@ -106,6 +106,7 @@ def init_db():
                 command      TEXT DEFAULT '',
                 launch_claude INTEGER DEFAULT 1,
                 scrollback   BLOB DEFAULT x'',
+                compact_summary TEXT DEFAULT '',
                 created_at   REAL DEFAULT 0,
                 updated_at   REAL DEFAULT 0,
                 alive        INTEGER DEFAULT 1,
@@ -145,10 +146,21 @@ def init_db():
                 task         TEXT DEFAULT '',
                 command      TEXT DEFAULT '',
                 launch_claude INTEGER DEFAULT 1,
+                claude_session_id TEXT DEFAULT '',
+                transcript_path TEXT DEFAULT '',
                 created_at   REAL DEFAULT 0
             );
         """)
         os.makedirs(SCROLLBACK_DIR, exist_ok=True)
+
+        # Migrations
+        cols = {r[1] for r in db.execute("PRAGMA table_info(terminals)").fetchall()}
+        if "claude_session_id" not in cols:
+            db.execute("ALTER TABLE terminals ADD COLUMN claude_session_id TEXT DEFAULT ''")
+            db.commit()
+        if "transcript_path" not in cols:
+            db.execute("ALTER TABLE terminals ADD COLUMN transcript_path TEXT DEFAULT ''")
+            db.commit()
 
     db.close()
 
@@ -312,12 +324,20 @@ def find_pid_for_session(session_id):
 # ---------------------------------------------------------------------------
 
 def process_hook(payload):
-    """Process an incoming hook payload and update session state."""
+    """Process an incoming hook payload and update session state.
+
+    Claude Code hook payloads have fields at the top level:
+      - session_id, hook_event_name, cwd, permission_mode
+      - For Stop: last_assistant_message, stop_hook_active
+      - For UserPromptSubmit: prompt
+      - For Notification: type (notification subtype), title, message, etc.
+    """
     db = get_db()
 
     session_id = payload.get("session_id", "unknown")
-    hook_type = payload.get("type", "")
-    body = payload.get("body", {}) if isinstance(payload.get("body"), dict) else {}
+    # Support both old ("type") and current ("hook_event_name") field names
+    hook_type = payload.get("hook_event_name", "") or payload.get("type", "")
+    cwd = payload.get("cwd", "")
 
     store_event(db, session_id, hook_type, payload)
 
@@ -333,7 +353,6 @@ def process_hook(payload):
     fields = {}
 
     if hook_type == "SessionStart":
-        cwd = body.get("cwd", "")
         fields["cwd"] = cwd
         fields["repo"] = repo_from_cwd(cwd)
         fields["status"] = "running"
@@ -341,9 +360,24 @@ def process_hook(payload):
         fields["last_message"] = "Session started"
         fields["pid"] = find_pid_for_session(session_id)
 
+        # Link this Claude session to its dashboard terminal by matching cwd
+        transcript_path = payload.get("transcript_path", "")
+        tid = find_terminal_by_cwd(cwd)
+        if tid:
+            tdb = sqlite3.connect(DB_PATH)
+            tdb.execute(
+                "UPDATE terminals SET claude_session_id = ?, transcript_path = ? WHERE tid = ?",
+                (session_id, transcript_path, tid),
+            )
+            tdb.commit()
+            tdb.close()
+            with terminals_lock:
+                if tid in terminals:
+                    terminals[tid]["claude_session_id"] = session_id
+
     elif hook_type == "Notification":
-        notification_type = body.get("notification_type", "")
-        message = body.get("message", "")
+        notification_type = payload.get("notification_type", "")
+        message = payload.get("message", "")
 
         if notification_type == "permission_prompt":
             fields["status"] = "permission_needed"
@@ -367,7 +401,8 @@ def process_hook(payload):
     elif hook_type == "Stop":
         fields["status"] = "waiting_input"
         fields["needs_attention"] = 1
-        fields["last_message"] = "Finished — waiting for input"
+        msg = payload.get("last_assistant_message", "")
+        fields["last_message"] = (msg[:100] + "...") if len(msg) > 100 else msg or "Finished — waiting for input"
 
     elif hook_type == "UserPromptSubmit":
         fields["status"] = "running"
@@ -380,6 +415,10 @@ def process_hook(payload):
         fields["last_message"] = "Session ended"
 
     if fields:
+        # Sanitize any surrogate characters that sneak in from hook payloads
+        for k, v in fields.items():
+            if isinstance(v, str):
+                fields[k] = v.encode("utf-8", errors="replace").decode("utf-8")
         upsert_session(db, session_id, **fields)
 
     return session_id
@@ -428,6 +467,26 @@ def _load_scrollback(tid):
         return ""
     with open(sb_path, "r", encoding="utf-8", errors="replace") as f:
         return f.read()
+
+
+def extract_compact_summary(transcript_path):
+    """Read a Claude transcript .jsonl and return the latest /compact summary, or empty string."""
+    if not transcript_path or not os.path.exists(transcript_path):
+        return ""
+    try:
+        summary = ""
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") == "summary":
+                    # Each /compact overwrites — keep the latest
+                    summary = entry.get("summary", "")
+        return summary
+    except Exception:
+        return ""
 
 
 def find_terminal_by_cwd(cwd):
@@ -506,11 +565,6 @@ def create_terminal(label="", cwd=None, launch_claude=True, command=None, tid=No
         "command": command or "",
         "launch_claude": launch_claude,
     }
-
-    # Prepend old scrollback from previous session
-    if old_scrollback:
-        term["scrollback"].append(old_scrollback)
-        term["scrollback_len"] = len(old_scrollback)
 
     with terminals_lock:
         terminals[tid] = term
@@ -688,6 +742,65 @@ if not SERVER_MODE:
         db.close()
         return jsonify({"ok": True})
 
+    @app.route("/api/terminals/<tid>/summary")
+    def api_terminal_summary(tid):
+        """Extract a conversation summary from the terminal's Claude transcript."""
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        row = db.execute("SELECT transcript_path, claude_session_id FROM terminals WHERE tid = ?", (tid,)).fetchone()
+        db.close()
+
+        if not row or not row["transcript_path"]:
+            return jsonify({"error": "no transcript"}), 404
+
+        transcript_path = row["transcript_path"]
+        if not os.path.exists(transcript_path):
+            return jsonify({"error": "transcript file not found"}), 404
+
+        try:
+            messages = []
+            with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    entry = json.loads(line)
+                    entry_type = entry.get("type")
+
+                    if entry_type == "user":
+                        msg = entry.get("message", {})
+                        text = ""
+                        if isinstance(msg, list):
+                            for part in msg:
+                                if isinstance(part, dict) and part.get("type") == "text":
+                                    text = part["text"]
+                                    break
+                        elif isinstance(msg, str):
+                            text = msg
+                        if text:
+                            messages.append({"role": "user", "text": text})
+
+                    elif entry_type == "assistant":
+                        msg = entry.get("message", {})
+                        content = msg.get("content", []) if isinstance(msg, dict) else []
+                        texts = []
+                        for part in content:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                texts.append(part["text"])
+                        if texts:
+                            messages.append({"role": "assistant", "text": "\n".join(texts)})
+
+                    elif entry_type == "summary":
+                        # If there's a compact summary, use it instead
+                        summary_text = entry.get("summary", "")
+                        if summary_text:
+                            messages = [{"role": "summary", "text": summary_text}]
+
+            return jsonify({
+                "ok": True,
+                "session_id": row["claude_session_id"],
+                "messages": messages,
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/api/terminals/<tid>", methods=["DELETE"])
     def api_close_terminal(tid):
         close_terminal(tid)
@@ -836,16 +949,18 @@ if SERVER_MODE:
             sb_blob = _b64.b64decode(sb_b64) if sb_b64 else b""
             db.execute(
                 """INSERT INTO cloud_terminals (tid, machine_id, label, cwd, task, command,
-                        launch_claude, scrollback, created_at, updated_at, alive)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        launch_claude, scrollback, compact_summary, created_at, updated_at, alive)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                    ON CONFLICT(tid, machine_id) DO UPDATE SET
                         label=excluded.label, cwd=excluded.cwd, task=excluded.task,
                         command=excluded.command, launch_claude=excluded.launch_claude,
-                        scrollback=excluded.scrollback, created_at=excluded.created_at,
+                        scrollback=excluded.scrollback, compact_summary=excluded.compact_summary,
+                        created_at=excluded.created_at,
                         updated_at=excluded.updated_at, alive=1""",
                 (tid, machine_id, t.get("label", ""), t.get("cwd", ""), t.get("task", ""),
                  t.get("command", ""), t.get("launch_claude", 1),
-                 sb_blob, t.get("created_at", 0), t.get("updated_at", now)),
+                 sb_blob, t.get("compact_summary", ""),
+                 t.get("created_at", 0), t.get("updated_at", now)),
             )
 
         db.commit()
@@ -870,14 +985,21 @@ if SERVER_MODE:
         q += " ORDER BY t.updated_at DESC"
 
         rows = db.execute(q, p).fetchall()
-        return jsonify([{
-            "tid": r["tid"], "machine_id": r["machine_id"],
-            "hostname": r["hostname"] or r["machine_id"],
-            "label": r["label"], "cwd": r["cwd"], "task": r["task"],
-            "command": r["command"], "launch_claude": r["launch_claude"],
-            "created_at": r["created_at"], "updated_at": r["updated_at"],
-            "alive": r["alive"],
-        } for r in rows])
+        result = []
+        for r in rows:
+            entry = {
+                "tid": r["tid"], "machine_id": r["machine_id"],
+                "hostname": r["hostname"] or r["machine_id"],
+                "label": r["label"], "cwd": r["cwd"], "task": r["task"],
+                "command": r["command"], "launch_claude": r["launch_claude"],
+                "created_at": r["created_at"], "updated_at": r["updated_at"],
+                "alive": r["alive"],
+            }
+            summary = r["compact_summary"] if "compact_summary" in r.keys() else ""
+            entry["has_summary"] = bool(summary)
+            entry["compact_summary"] = summary
+            result.append(entry)
+        return jsonify(result)
 
     @app.route("/api/terminals/<tid>/scrollback")
     def api_cloud_scrollback(tid):
@@ -916,9 +1038,12 @@ if not SERVER_MODE:
         pty = term["pty"]
 
         # Replay scrollback then subscribe to live output
+        # Skip replay if client signals reconnect (already has content in buffer)
+        skip_replay = request.args.get("replay") == "0"
         with terminals_lock:
-            for chunk in term["scrollback"]:
-                ws.send(chunk)
+            if not skip_replay:
+                for chunk in term["scrollback"]:
+                    ws.send(chunk)
             term["subscribers"].append(ws)
 
         try:
@@ -965,20 +1090,28 @@ def restore_terminals():
         old_scrollback = _load_scrollback(tid)
         command = row["command"] or None
         launch_claude = bool(row["launch_claude"])
+        claude_session_id = row["claude_session_id"] if "claude_session_id" in row.keys() else ""
+
+        # If we have a Claude session ID, resume it instead of starting fresh
+        restore_command = command
+        if launch_claude and claude_session_id:
+            restore_command = f"claude --resume {claude_session_id}"
+            launch_claude = False  # we're passing the full command ourselves
 
         create_terminal(
             label=row["label"],
             cwd=cwd,
             launch_claude=launch_claude,
-            command=command,
+            command=restore_command,
             tid=tid,
             old_scrollback=old_scrollback,
         )
 
-        # Restore task after creation
+        # Restore task and session ID after creation
         with terminals_lock:
             if tid in terminals:
                 terminals[tid]["task"] = row["task"] or ""
+                terminals[tid]["claude_session_id"] = claude_session_id
 
     count = len(rows)
     if count:

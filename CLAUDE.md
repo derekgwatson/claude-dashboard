@@ -15,13 +15,15 @@ A native desktop app (pywebview + Flask) for monitoring multiple Claude Code ses
 ```
 claude-dashboard/
 ├── app.py              # Flask API (background thread) + pywebview native window
-├── hook_receiver.py    # Stdin→HTTP bridge for Claude Code hooks (auto-starts dashboard)
+├── hook_receiver.py    # Stdin→HTTP bridge (fire-and-forget via hook_sender.py)
+├── hook_sender.py      # Background process that POSTs hook data to dashboard
 ├── start.py            # One-command setup: installs deps, configures hooks, starts server
 ├── setup_hooks.py      # Merges hook config into ~/.claude/settings.json
+├── sync_client.py      # Background thread: pushes terminal state to cloud server
 ├── templates/
 │   └── index.html      # Single-page dashboard
 └── static/
-    ├── app.js          # Polls /api/sessions every 2s, renders session cards
+    ├── app.js          # Terminal multiplexer + session cards + remote terminal viewer
     └── style.css       # Dark theme, red highlight for attention-needed sessions
 ```
 
@@ -29,19 +31,44 @@ claude-dashboard/
 
 1. `app.py` starts Flask in a daemon thread (serves API on port 8765) and opens a pywebview native window
 2. Claude Code fires a hook event → runs `hook_receiver.py` via stdin
-3. `hook_receiver.py` POSTs the JSON payload to `http://127.0.0.1:8765/hook`
-4. If the dashboard isn't running, `hook_receiver.py` auto-starts it
+3. `hook_receiver.py` spawns `hook_sender.py` as a fire-and-forget background process (never blocks Claude's terminal)
+4. `hook_sender.py` POSTs the JSON payload to `http://127.0.0.1:8765/hook`; auto-starts dashboard if needed
 5. Flask processes the hook, upserts the session in SQLite, stores the raw event
 6. Dashboard polls `/api/sessions` every 2s; attention-needed sessions sort to top
 
+### Session Resume on Server Restart
+
+When the dashboard server restarts, terminals are restored from the DB. If a Claude session ID was captured (via `SessionStart` hook), the terminal runs `claude --resume <session_id>` instead of a fresh `claude`, preserving full conversation context.
+
+**How it works:**
+- `SessionStart` hooks include `session_id` and `cwd`
+- The dashboard matches the hook to a terminal by `cwd` and stores the `claude_session_id`
+- On restart, `restore_terminals()` uses `--resume` for terminals that have a saved session ID
+
+**Important:** Raw terminal scrollback is NOT replayed on restart (cursor-addressed escape sequences from Claude Code's UI cause scrambling). The terminal starts clean and Claude's `--resume` restores context.
+
+### Cross-Machine Context via Compact Summaries
+
+Claude sessions can't be resumed across machines (transcripts are project-path-scoped). Instead:
+1. Run `/compact` in a Claude session to create a conversation summary
+2. The sync client reads the summary from the transcript `.jsonl` and pushes it to the cloud DB
+3. On another machine, remote terminals show an "Open locally (with context)" button
+4. Clicking it creates a local terminal and auto-pastes the compact summary as context
+
 ### Hook Events Handled
+
+Hook payloads have fields at the **top level** (not nested in a `body` sub-object):
+- `session_id`, `hook_event_name`, `cwd`, `transcript_path`, `permission_mode`
+- Stop: `last_assistant_message`, `stop_hook_active`
+- UserPromptSubmit: `prompt`
+- Notification: `notification_type`, `message`
 
 | Event | Effect |
 |-------|--------|
-| `SessionStart` | Creates/updates session with cwd, repo, status=running |
+| `SessionStart` | Creates/updates session with cwd, repo, status=running. Links claude_session_id to terminal. |
 | `Notification` (permission_prompt) | Sets status=permission_needed, needs_attention=1 |
 | `Notification` (idle_prompt) | Sets status=waiting_input, needs_attention=1 |
-| `Stop` | Sets status=waiting_input, needs_attention=1 |
+| `Stop` | Sets status=waiting_input, needs_attention=1, stores last_assistant_message snippet |
 | `UserPromptSubmit` | Sets status=running, needs_attention=0 |
 | `SubagentStart` | Sets status=running |
 | `SubagentStop` | Updates last_message |
@@ -57,11 +84,17 @@ Uses `EnumWindows` to find the Windows Terminal window, then `SetForegroundWindo
 
 ## Data Model
 
-**sessions** — one row per Claude Code session
+**sessions** — one row per Claude Code session (from hooks)
 - `session_id` (PK), `pid`, `label`, `cwd`, `repo`, `status`, `needs_attention`, `last_message`, `updated_at`
+
+**terminals** — one row per dashboard terminal (PTY)
+- `tid` (PK), `label`, `cwd`, `task`, `command`, `launch_claude`, `claude_session_id`, `transcript_path`, `created_at`
 
 **events** — raw hook payloads for debugging
 - `id` (PK), `session_id`, `hook_type`, `payload` (JSON), `created_at`
+
+**cloud_terminals** (server mode only) — synced terminal state from all machines
+- `(tid, machine_id)` (PK), `label`, `cwd`, `task`, `command`, `launch_claude`, `scrollback`, `compact_summary`, `created_at`, `updated_at`, `alive`
 
 SQLite database at `dashboard.db` (gitignored). Created automatically on first run.
 
