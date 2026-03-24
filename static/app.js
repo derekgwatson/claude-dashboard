@@ -359,22 +359,24 @@ function connectTerminal(tid, label, cwd) {
         setTimeout(() => {
             if (terminals[tid]) {
                 terminals[tid].fitAddon.fit();
-                // Explicitly send resize so the PTY matches xterm's actual dimensions.
-                // fit() only fires onResize if the size changed since last fit, but
-                // we already called fit() before the WS was open, so the event was lost.
                 const { cols, rows } = terminals[tid].term;
-                ws.send(JSON.stringify({ type: "resize", cols, rows }));
+                const liveWs = terminals[tid].ws;
+                if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+                    liveWs.send(JSON.stringify({ type: "resize", cols, rows }));
+                }
             }
         }, 100);
     };
 
     ws.onclose = () => {
-        term.write("\r\n\x1b[90m[terminal disconnected]\x1b[0m\r\n");
+        term.write("\r\n\x1b[33m[server disconnected — reconnecting...]\x1b[0m\r\n");
+        attemptReconnect(tid);
     };
 
     term.onData((data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "input", data }));
+        const liveWs = terminals[tid]?.ws;
+        if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+            liveWs.send(JSON.stringify({ type: "input", data }));
         }
     });
 
@@ -390,8 +392,9 @@ function connectTerminal(tid, label, cwd) {
         if (e.ctrlKey && e.shiftKey && e.key === "V") {
             e.preventDefault();
             navigator.clipboard.readText().then((text) => {
-                if (text && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: "input", data: text }));
+                const liveWs = terminals[tid]?.ws;
+                if (text && liveWs && liveWs.readyState === WebSocket.OPEN) {
+                    liveWs.send(JSON.stringify({ type: "input", data: text }));
                 }
             });
             return false;
@@ -410,8 +413,9 @@ function connectTerminal(tid, label, cwd) {
     });
 
     term.onResize(({ cols, rows }) => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "resize", cols, rows }));
+        const liveWs = terminals[tid]?.ws;
+        if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+            liveWs.send(JSON.stringify({ type: "resize", cols, rows }));
         }
     });
 
@@ -431,9 +435,10 @@ function connectTerminal(tid, label, cwd) {
                     body: JSON.stringify({ filename: file.name }),
                 });
                 const data = await resp.json();
-                if (data.ok && ws.readyState === WebSocket.OPEN) {
+                const liveWs2 = terminals[tid]?.ws;
+                if (data.ok && liveWs2 && liveWs2.readyState === WebSocket.OPEN) {
                     const path = data.path.includes(" ") ? `"${data.path}"` : data.path;
-                    ws.send(JSON.stringify({ type: "input", data: path + " " }));
+                    liveWs2.send(JSON.stringify({ type: "input", data: path + " " }));
                 }
             } catch (e) {
                 // ignore
@@ -551,6 +556,66 @@ async function pasteLatestScreenshot(tid) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Auto-reconnect WebSocket on server disconnect
+// ---------------------------------------------------------------------------
+
+function attemptReconnect(tid) {
+    const t = terminals[tid];
+    if (!t) return;
+
+    let delay = 1000;
+    const maxDelay = 10000;
+
+    function tryConnect() {
+        // Check if server is back by pinging the terminals API
+        fetch("/api/terminals").then(resp => {
+            if (!resp.ok) throw new Error("not ready");
+            return resp.json();
+        }).then(list => {
+            const match = list.find(x => x.terminal_id === tid && x.alive);
+            if (!match) {
+                // Terminal no longer exists on server
+                t.term.write("\r\n\x1b[90m[terminal closed on server]\x1b[0m\r\n");
+                return;
+            }
+
+            // Server is back — reconnect WebSocket
+            const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+            const newWs = new WebSocket(`${wsProto}//${location.host}/ws/terminal/${tid}`);
+
+            newWs.onopen = () => {
+                // Clear terminal and let scrollback replay from server
+                t.term.clear();
+                t.term.write("\x1b[2J\x1b[H"); // full clear
+                t.ws = newWs;
+                t.term.write("\x1b[32m[reconnected]\x1b[0m\r\n");
+                setTimeout(() => {
+                    t.fitAddon.fit();
+                    const { cols, rows } = t.term;
+                    newWs.send(JSON.stringify({ type: "resize", cols, rows }));
+                }, 100);
+            };
+
+            newWs.onmessage = (event) => {
+                t.term.write(event.data);
+            };
+
+            newWs.onclose = () => {
+                t.term.write("\r\n\x1b[33m[server disconnected — reconnecting...]\x1b[0m\r\n");
+                attemptReconnect(tid);
+            };
+
+        }).catch(() => {
+            // Server not back yet — retry with backoff
+            delay = Math.min(delay * 1.5, maxDelay);
+            setTimeout(tryConnect, delay);
+        });
+    }
+
+    setTimeout(tryConnect, delay);
+}
+
 window.addEventListener("resize", () => {
     if (activeTerminalId && terminals[activeTerminalId]) {
         terminals[activeTerminalId].fitAddon.fit();
@@ -592,7 +657,12 @@ async function reconnectTerminals() {
     }
 }
 
-loadSettings().then(() => reconnectTerminals());
+loadSettings().then(() => reconnectTerminals()).then(() => {
+    loadSyncStatus();
+    loadRemoteTerminals();
+    // Poll remote terminals every 30s
+    setInterval(loadRemoteTerminals, 30000);
+});
 
 // Task description — save per terminal via sidebar textarea
 terminalTabs?.addEventListener("input", (e) => {
@@ -625,4 +695,167 @@ terminalTabs?.addEventListener("keydown", (e) => {
         }
     }
 });
+
+// ---------------------------------------------------------------------------
+// Remote terminals (from other machines via cloud sync)
+// ---------------------------------------------------------------------------
+
+const remoteSection = document.getElementById("remote-section");
+const syncStatusEl = document.getElementById("sync-status");
+let remoteTerminals = [];  // cached list from server
+let activeRemoteId = null; // "machine_id:tid" if viewing a remote terminal
+
+async function loadSyncStatus() {
+    try {
+        const resp = await fetch("/api/sync/status");
+        const status = await resp.json();
+        if (!syncStatusEl) return;
+        if (!status.configured) {
+            syncStatusEl.innerHTML = "";
+            return;
+        }
+        const ago = status.last_sync
+            ? Math.round((Date.now() / 1000 - status.last_sync)) + "s ago"
+            : "never";
+        const err = status.last_error ? ` <span class="sync-err" title="${escHtml(status.last_error)}">!</span>` : "";
+        syncStatusEl.innerHTML = `<div class="sync-info">Sync: ${escHtml(status.hostname)}${err}<span class="sync-ago">${ago}</span></div>`;
+    } catch (e) {}
+}
+
+async function loadRemoteTerminals() {
+    if (!remoteSection) return;
+    try {
+        const resp = await fetch("/api/remote-terminals");
+        remoteTerminals = await resp.json();
+    } catch (e) {
+        remoteTerminals = [];
+    }
+
+    if (remoteTerminals.length === 0) {
+        remoteSection.innerHTML = "";
+        return;
+    }
+
+    // Group by machine
+    const byMachine = {};
+    for (const t of remoteTerminals) {
+        const key = t.machine_id;
+        if (!byMachine[key]) byMachine[key] = { hostname: t.hostname, terminals: [] };
+        byMachine[key].terminals.push(t);
+    }
+
+    let html = '<div class="remote-label">Remote</div>';
+    for (const [machineId, info] of Object.entries(byMachine)) {
+        html += `<div class="remote-machine">${escHtml(info.hostname)}</div>`;
+        for (const t of info.terminals) {
+            const remoteId = `${t.machine_id}:${t.tid}`;
+            const active = activeRemoteId === remoteId ? " active" : "";
+            const alive = t.alive ? '<span class="remote-alive"></span>' : "";
+            html += `<div class="remote-tab${active}" data-remote-id="${escHtml(remoteId)}" data-tid="${escHtml(t.tid)}" data-machine="${escHtml(t.machine_id)}">
+                <span class="remote-tab-label">${alive}${escHtml(t.label || t.cwd)}</span>
+            </div>`;
+        }
+    }
+    remoteSection.innerHTML = html;
+
+    // Also refresh sync status
+    loadSyncStatus();
+}
+
+remoteSection?.addEventListener("click", (e) => {
+    const tab = e.target.closest(".remote-tab");
+    if (!tab) return;
+    const tid = tab.dataset.tid;
+    const machineId = tab.dataset.machine;
+    const remoteId = tab.dataset.remoteId;
+    viewRemoteTerminal(tid, machineId, remoteId);
+});
+
+async function viewRemoteTerminal(tid, machineId, remoteId) {
+    // Deactivate local terminal
+    if (activeTerminalId && terminals[activeTerminalId]) {
+        terminals[activeTerminalId].wrapEl.style.display = "none";
+        terminals[activeTerminalId].tabEl.classList.remove("active");
+    }
+    activeTerminalId = null;
+    activeRemoteId = remoteId;
+
+    // Update tab highlighting
+    remoteSection.querySelectorAll(".remote-tab").forEach(el => el.classList.remove("active"));
+    const activeTab = remoteSection.querySelector(`[data-remote-id="${CSS.escape(remoteId)}"]`);
+    if (activeTab) activeTab.classList.add("active");
+
+    // Remove any existing remote viewer
+    const existing = terminalContainer.querySelector(".remote-viewer");
+    if (existing) existing.remove();
+
+    // Fetch scrollback
+    const viewerEl = document.createElement("div");
+    viewerEl.className = "remote-viewer";
+    terminalContainer.appendChild(viewerEl);
+    emptyState.style.display = "none";
+
+    const term = new Terminal({
+        cursorBlink: false,
+        scrollback: 50000,
+        fontSize: currentFontSize,
+        fontFamily: "'Cascadia Code', 'Consolas', monospace",
+        disableStdin: true,
+        theme: {
+            background: "#0d1117",
+            foreground: "#e6edf3",
+            cursor: "#0d1117", // hide cursor
+            selectionBackground: "#264f78",
+            black: "#0d1117",
+            red: "#ff7b72",
+            green: "#3fb950",
+            yellow: "#d29922",
+            blue: "#58a6ff",
+            magenta: "#bc8cff",
+            cyan: "#39c5cf",
+            white: "#e6edf3",
+        },
+    });
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(viewerEl);
+    fitAddon.fit();
+
+    term.write("\x1b[90m[Loading remote scrollback...]\x1b[0m\r\n");
+
+    try {
+        const resp = await fetch(`/api/remote-terminals/${tid}/scrollback?machine_id=${encodeURIComponent(machineId)}`);
+        const data = await resp.json();
+        if (data.ok && data.scrollback) {
+            term.clear();
+            term.write("\x1b[2J\x1b[H");
+            term.write(data.scrollback);
+        } else {
+            term.write("\x1b[90m[No scrollback available]\x1b[0m\r\n");
+        }
+    } catch (e) {
+        term.write("\x1b[31m[Failed to load scrollback]\x1b[0m\r\n");
+    }
+
+    // Store for cleanup
+    viewerEl._term = term;
+    viewerEl._fitAddon = fitAddon;
+
+    // Find remote terminal info for path bar
+    const info = remoteTerminals.find(t => t.tid === tid && t.machine_id === machineId);
+    if (pathBar && info) pathBar.textContent = `${info.hostname}: ${info.cwd}`;
+}
+
+// Clean up remote viewer when switching to a local terminal
+const origSwitchTerminal = switchTerminal;
+switchTerminal = function(tid) {
+    activeRemoteId = null;
+    const viewer = terminalContainer.querySelector(".remote-viewer");
+    if (viewer) {
+        if (viewer._term) viewer._term.dispose();
+        viewer.remove();
+    }
+    remoteSection?.querySelectorAll(".remote-tab").forEach(el => el.classList.remove("active"));
+    origSwitchTerminal(tid);
+};
 

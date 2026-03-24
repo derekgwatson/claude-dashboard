@@ -1,10 +1,15 @@
-"""Claude Session Dashboard — terminal multiplexer + session monitor."""
+"""Claude Session Dashboard — terminal multiplexer + session monitor.
+
+Run modes:
+    python app.py              # Desktop mode (PTY terminals, local dashboard)
+    python app.py --server     # Server mode (cloud sync API only, no PTY)
+"""
 
 import atexit
-import ctypes
 import glob
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -14,13 +19,28 @@ import uuid
 from pathlib import Path
 
 from flask import Flask, g, jsonify, render_template, request
-from flask_sock import Sock
-from winpty import PtyProcess
+
+# ---------------------------------------------------------------------------
+# Mode detection (early, before conditional imports)
+# ---------------------------------------------------------------------------
+
+SERVER_MODE = "--server" in sys.argv or os.environ.get("SERVER_MODE", "") == "1"
+SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "")
+
+# Desktop-only imports (not available on Linux VPS)
+if not SERVER_MODE:
+    from flask_sock import Sock
+    from winpty import PtyProcess
+    import ctypes
+    import sync_client
 
 app = Flask(__name__)
-sock = Sock(app)
-DB_PATH = os.path.join(os.path.dirname(__file__), "dashboard.db")
-SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
+if not SERVER_MODE:
+    sock = Sock(app)
+
+_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(_DIR, "cloud.db" if SERVER_MODE else "dashboard.db")
+SETTINGS_PATH = os.path.join(_DIR, "settings.json")
 DEFAULT_SETTINGS = {"font_size": 16}
 CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 
@@ -28,6 +48,20 @@ CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 terminals = {}
 terminals_lock = threading.Lock()
 SCROLLBACK_MAX = 200_000  # characters to keep per terminal
+
+
+# ---------------------------------------------------------------------------
+# Server-mode auth
+# ---------------------------------------------------------------------------
+
+if SERVER_MODE:
+    @app.before_request
+    def check_auth():
+        if not SYNC_TOKEN:
+            return
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {SYNC_TOKEN}":
+            return jsonify({"error": "unauthorized"}), 401
 
 
 # ---------------------------------------------------------------------------
@@ -49,42 +83,74 @@ def close_db(exc):
         db.close()
 
 
-SCROLLBACK_DIR = os.path.join(os.path.dirname(__file__), "scrollback")
+SCROLLBACK_DIR = os.path.join(_DIR, "scrollback")
 
 
 def init_db():
     db = sqlite3.connect(DB_PATH)
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            session_id   TEXT PRIMARY KEY,
-            pid          INTEGER DEFAULT 0,
-            label        TEXT DEFAULT '',
-            cwd          TEXT DEFAULT '',
-            repo         TEXT DEFAULT '',
-            status       TEXT DEFAULT 'running',
-            needs_attention INTEGER DEFAULT 0,
-            last_message TEXT DEFAULT '',
-            updated_at   REAL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS events (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            hook_type  TEXT,
-            payload    TEXT,
-            created_at REAL
-        );
-        CREATE TABLE IF NOT EXISTS terminals (
-            tid          TEXT PRIMARY KEY,
-            label        TEXT DEFAULT '',
-            cwd          TEXT DEFAULT '',
-            task         TEXT DEFAULT '',
-            command      TEXT DEFAULT '',
-            launch_claude INTEGER DEFAULT 1,
-            created_at   REAL DEFAULT 0
-        );
-    """)
+
+    if SERVER_MODE:
+        # Cloud sync tables only
+        db.executescript("""
+            CREATE TABLE IF NOT EXISTS machines (
+                machine_id   TEXT PRIMARY KEY,
+                hostname     TEXT DEFAULT '',
+                last_seen    REAL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS cloud_terminals (
+                tid          TEXT,
+                machine_id   TEXT,
+                label        TEXT DEFAULT '',
+                cwd          TEXT DEFAULT '',
+                task         TEXT DEFAULT '',
+                command      TEXT DEFAULT '',
+                launch_claude INTEGER DEFAULT 1,
+                scrollback   BLOB DEFAULT x'',
+                created_at   REAL DEFAULT 0,
+                updated_at   REAL DEFAULT 0,
+                alive        INTEGER DEFAULT 1,
+                PRIMARY KEY (tid, machine_id)
+            );
+            CREATE TABLE IF NOT EXISTS cloud_settings (
+                machine_id   TEXT PRIMARY KEY,
+                data         TEXT DEFAULT '{}',
+                updated_at   REAL DEFAULT 0
+            );
+        """)
+    else:
+        # Desktop tables
+        db.executescript("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id   TEXT PRIMARY KEY,
+                pid          INTEGER DEFAULT 0,
+                label        TEXT DEFAULT '',
+                cwd          TEXT DEFAULT '',
+                repo         TEXT DEFAULT '',
+                status       TEXT DEFAULT 'running',
+                needs_attention INTEGER DEFAULT 0,
+                last_message TEXT DEFAULT '',
+                updated_at   REAL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS events (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                hook_type  TEXT,
+                payload    TEXT,
+                created_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS terminals (
+                tid          TEXT PRIMARY KEY,
+                label        TEXT DEFAULT '',
+                cwd          TEXT DEFAULT '',
+                task         TEXT DEFAULT '',
+                command      TEXT DEFAULT '',
+                launch_claude INTEGER DEFAULT 1,
+                created_at   REAL DEFAULT 0
+            );
+        """)
+        os.makedirs(SCROLLBACK_DIR, exist_ok=True)
+
     db.close()
-    os.makedirs(SCROLLBACK_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -515,235 +581,209 @@ def close_terminal(tid):
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Desktop-mode routes
 # ---------------------------------------------------------------------------
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+if not SERVER_MODE:
 
+    @app.route("/")
+    def index():
+        return render_template("index.html")
 
-@app.route("/hook", methods=["POST"])
-def hook():
-    payload = request.get_json(silent=True)
-    if not payload:
-        return jsonify({"error": "no JSON body"}), 400
-    session_id = process_hook(payload)
-    return jsonify({"ok": True, "session_id": session_id})
+    @app.route("/hook", methods=["POST"])
+    def hook():
+        payload = request.get_json(silent=True)
+        if not payload:
+            return jsonify({"error": "no JSON body"}), 400
+        session_id = process_hook(payload)
+        return jsonify({"ok": True, "session_id": session_id})
 
+    @app.route("/api/sessions")
+    def api_sessions():
+        db = get_db()
+        rows = db.execute(
+            "SELECT * FROM sessions ORDER BY needs_attention DESC, updated_at DESC"
+        ).fetchall()
+        sessions = [dict(r) for r in rows]
+        return jsonify(sessions)
 
-@app.route("/api/sessions")
-def api_sessions():
-    db = get_db()
-    rows = db.execute(
-        "SELECT * FROM sessions ORDER BY needs_attention DESC, updated_at DESC"
-    ).fetchall()
-    sessions = [dict(r) for r in rows]
-    return jsonify(sessions)
-
-
-@app.route("/api/sessions/<session_id>/label", methods=["PUT"])
-def update_label(session_id):
-    data = request.get_json(silent=True) or {}
-    label = data.get("label", "")
-    db = get_db()
-    db.execute(
-        "UPDATE sessions SET label = ? WHERE session_id = ?", (label, session_id)
-    )
-    db.commit()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/sessions/<session_id>/dismiss", methods=["POST"])
-def dismiss_session(session_id):
-    db = get_db()
-    db.execute(
-        "UPDATE sessions SET needs_attention = 0, status = 'idle', updated_at = ? WHERE session_id = ?",
-        (now_ts(), session_id),
-    )
-    db.commit()
-    return jsonify({"ok": True})
-
-
-# --- Terminal API ---
-
-@app.route("/api/projects")
-def api_projects():
-    """List known project directories for the project picker."""
-    projects = discover_projects()
-    # Mark which ones already have a terminal open
-    for p in projects:
-        p["has_terminal"] = find_terminal_by_cwd(p["path"]) is not None
-    return jsonify(projects)
-
-
-@app.route("/api/terminals", methods=["GET", "POST"])
-def api_terminals():
-    if request.method == "POST":
+    @app.route("/api/sessions/<session_id>/label", methods=["PUT"])
+    def update_label(session_id):
         data = request.get_json(silent=True) or {}
         label = data.get("label", "")
-        cwd = data.get("cwd", None)
-        command = data.get("command", None)
-        launch_claude = data.get("launch_claude", True)
+        db = get_db()
+        db.execute(
+            "UPDATE sessions SET label = ? WHERE session_id = ?", (label, session_id)
+        )
+        db.commit()
+        return jsonify({"ok": True})
 
-        # If a terminal already exists for this cwd (and no custom command), return it
-        if cwd and not command:
-            existing = find_terminal_by_cwd(cwd)
-            if existing:
-                return jsonify({"ok": True, "terminal_id": existing, "existing": True})
+    @app.route("/api/sessions/<session_id>/dismiss", methods=["POST"])
+    def dismiss_session(session_id):
+        db = get_db()
+        db.execute(
+            "UPDATE sessions SET needs_attention = 0, status = 'idle', updated_at = ? WHERE session_id = ?",
+            (now_ts(), session_id),
+        )
+        db.commit()
+        return jsonify({"ok": True})
 
-        tid = create_terminal(label=label, cwd=cwd, launch_claude=launch_claude, command=command)
+    @app.route("/api/projects")
+    def api_projects():
+        projects = discover_projects()
+        for p in projects:
+            p["has_terminal"] = find_terminal_by_cwd(p["path"]) is not None
+        return jsonify(projects)
+
+    @app.route("/api/terminals", methods=["GET", "POST"])
+    def api_terminals():
+        if request.method == "POST":
+            data = request.get_json(silent=True) or {}
+            label = data.get("label", "")
+            cwd = data.get("cwd", None)
+            command = data.get("command", None)
+            launch_claude = data.get("launch_claude", True)
+            if cwd and not command:
+                existing = find_terminal_by_cwd(cwd)
+                if existing:
+                    return jsonify({"ok": True, "terminal_id": existing, "existing": True})
+            tid = create_terminal(label=label, cwd=cwd, launch_claude=launch_claude, command=command)
+            with terminals_lock:
+                actual_label = terminals[tid]["label"]
+            return jsonify({"ok": True, "terminal_id": tid, "label": actual_label})
+        # GET
         with terminals_lock:
-            actual_label = terminals[tid]["label"]
-        return jsonify({"ok": True, "terminal_id": tid, "label": actual_label})
+            result = []
+            for tid, t in terminals.items():
+                result.append({
+                    "terminal_id": tid, "label": t["label"], "cwd": t["cwd"],
+                    "alive": t["pty"].isalive(), "created_at": t["created_at"],
+                    "task": t.get("task", ""),
+                })
+        return jsonify(result)
 
-    # GET
-    with terminals_lock:
-        result = []
-        for tid, t in terminals.items():
-            result.append({
-                "terminal_id": tid,
-                "label": t["label"],
-                "cwd": t["cwd"],
-                "alive": t["pty"].isalive(),
-                "created_at": t["created_at"],
-                "task": t.get("task", ""),
-            })
-    return jsonify(result)
-
-
-@app.route("/api/terminals/<tid>/label", methods=["PUT"])
-def api_rename_terminal(tid):
-    data = request.get_json(silent=True) or {}
-    new_label = data.get("label", "")
-    with terminals_lock:
-        if tid in terminals:
-            terminals[tid]["label"] = new_label or terminals[tid]["label"]
-    # Persist to DB
-    db = sqlite3.connect(DB_PATH)
-    db.execute("UPDATE terminals SET label = ? WHERE tid = ?", (new_label, tid))
-    db.commit()
-    db.close()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/terminals/<tid>/task", methods=["PUT"])
-def api_update_task(tid):
-    data = request.get_json(silent=True) or {}
-    task = data.get("task", "")
-    with terminals_lock:
-        if tid in terminals:
-            terminals[tid]["task"] = task
-    # Persist to DB
-    db = sqlite3.connect(DB_PATH)
-    db.execute("UPDATE terminals SET task = ? WHERE tid = ?", (task, tid))
-    db.commit()
-    db.close()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/terminals/<tid>", methods=["DELETE"])
-def api_close_terminal(tid):
-    close_terminal(tid)
-    return jsonify({"ok": True})
-
-
-@app.route("/api/file-picker", methods=["POST"])
-def api_file_picker():
-    """Open a native file dialog and return the selected path."""
-    import tkinter as tk
-    from tkinter import filedialog
-
-    data = request.get_json(silent=True) or {}
-    cwd = data.get("cwd", os.path.expanduser("~"))
-
-    # tkinter must run on a thread with a message loop
-    result = {}
-
-    def _pick():
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        path = filedialog.askopenfilename(initialdir=cwd)
-        result["path"] = path
-        root.destroy()
-
-    t = threading.Thread(target=_pick)
-    t.start()
-    t.join(timeout=60)
-
-    path = result.get("path", "")
-    if not path:
-        return jsonify({"ok": False})
-    return jsonify({"ok": True, "path": path})
-
-
-# Well-known folders to search when resolving a dropped filename to a full path
-_SEARCH_FOLDERS = [
-    os.path.join(os.path.expanduser("~"), "Pictures", "Screenshots"),
-    os.path.join(os.path.expanduser("~"), "Downloads"),
-    os.path.join(os.path.expanduser("~"), "Desktop"),
-    os.path.join(os.path.expanduser("~"), "Pictures"),
-    os.path.join(os.path.expanduser("~"), "Documents"),
-]
-
-
-@app.route("/api/resolve-file", methods=["POST"])
-def api_resolve_file():
-    """Given a filename, find its full path in well-known folders."""
-    data = request.get_json(silent=True) or {}
-    filename = data.get("filename", "")
-    if not filename:
-        return jsonify({"ok": False})
-
-    for folder in _SEARCH_FOLDERS:
-        candidate = os.path.join(folder, filename)
-        if os.path.isfile(candidate):
-            return jsonify({"ok": True, "path": candidate})
-
-    return jsonify({"ok": False})
-
-
-@app.route("/api/settings", methods=["GET", "PUT"])
-def api_settings():
-    if request.method == "PUT":
+    @app.route("/api/terminals/<tid>/label", methods=["PUT"])
+    def api_rename_terminal(tid):
         data = request.get_json(silent=True) or {}
+        new_label = data.get("label", "")
+        with terminals_lock:
+            if tid in terminals:
+                terminals[tid]["label"] = new_label or terminals[tid]["label"]
+        db = sqlite3.connect(DB_PATH)
+        db.execute("UPDATE terminals SET label = ? WHERE tid = ?", (new_label, tid))
+        db.commit()
+        db.close()
+        return jsonify({"ok": True})
+
+    @app.route("/api/terminals/<tid>/task", methods=["PUT"])
+    def api_update_task(tid):
+        data = request.get_json(silent=True) or {}
+        task = data.get("task", "")
+        with terminals_lock:
+            if tid in terminals:
+                terminals[tid]["task"] = task
+        db = sqlite3.connect(DB_PATH)
+        db.execute("UPDATE terminals SET task = ? WHERE tid = ?", (task, tid))
+        db.commit()
+        db.close()
+        return jsonify({"ok": True})
+
+    @app.route("/api/terminals/<tid>", methods=["DELETE"])
+    def api_close_terminal(tid):
+        close_terminal(tid)
+        return jsonify({"ok": True})
+
+    @app.route("/api/file-picker", methods=["POST"])
+    def api_file_picker():
+        import tkinter as tk
+        from tkinter import filedialog
+        data = request.get_json(silent=True) or {}
+        cwd = data.get("cwd", os.path.expanduser("~"))
+        result = {}
+        def _pick():
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            path = filedialog.askopenfilename(initialdir=cwd)
+            result["path"] = path
+            root.destroy()
+        t = threading.Thread(target=_pick)
+        t.start()
+        t.join(timeout=60)
+        path = result.get("path", "")
+        if not path:
+            return jsonify({"ok": False})
+        return jsonify({"ok": True, "path": path})
+
+    _SEARCH_FOLDERS = [
+        os.path.join(os.path.expanduser("~"), "Pictures", "Screenshots"),
+        os.path.join(os.path.expanduser("~"), "Downloads"),
+        os.path.join(os.path.expanduser("~"), "Desktop"),
+        os.path.join(os.path.expanduser("~"), "Pictures"),
+        os.path.join(os.path.expanduser("~"), "Documents"),
+    ]
+
+    @app.route("/api/resolve-file", methods=["POST"])
+    def api_resolve_file():
+        data = request.get_json(silent=True) or {}
+        filename = data.get("filename", "")
+        if not filename:
+            return jsonify({"ok": False})
+        for folder in _SEARCH_FOLDERS:
+            candidate = os.path.join(folder, filename)
+            if os.path.isfile(candidate):
+                return jsonify({"ok": True, "path": candidate})
+        return jsonify({"ok": False})
+
+    @app.route("/api/settings", methods=["GET", "PUT"])
+    def api_settings():
+        if request.method == "PUT":
+            data = request.get_json(silent=True) or {}
+            try:
+                with open(SETTINGS_PATH) as f:
+                    settings = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                settings = dict(DEFAULT_SETTINGS)
+            settings.update(data)
+            with open(SETTINGS_PATH, "w") as f:
+                json.dump(settings, f)
+            return jsonify(settings)
         try:
             with open(SETTINGS_PATH) as f:
-                settings = json.load(f)
+                return jsonify(json.load(f))
         except (OSError, json.JSONDecodeError):
-            settings = dict(DEFAULT_SETTINGS)
-        settings.update(data)
-        with open(SETTINGS_PATH, "w") as f:
-            json.dump(settings, f)
-        return jsonify(settings)
+            return jsonify(dict(DEFAULT_SETTINGS))
 
-    # GET
-    try:
-        with open(SETTINGS_PATH) as f:
-            return jsonify(json.load(f))
-    except (OSError, json.JSONDecodeError):
-        return jsonify(dict(DEFAULT_SETTINGS))
+    @app.route("/api/sync/status")
+    def api_sync_status():
+        return jsonify(sync_client.get_status())
 
+    @app.route("/api/remote-terminals")
+    def api_remote_terminals():
+        return jsonify(sync_client.pull_remote_terminals())
 
-@app.route("/api/latest-screenshot")
-def api_latest_screenshot():
-    """Return the path to the most recent file in the Screenshots folder."""
-    screenshots = os.path.join(os.path.expanduser("~"), "Pictures", "Screenshots")
-    if not os.path.isdir(screenshots):
-        return jsonify({"ok": False})
+    @app.route("/api/remote-terminals/<tid>/scrollback")
+    def api_remote_scrollback(tid):
+        machine_id = request.args.get("machine_id", "")
+        if not machine_id:
+            return jsonify({"error": "machine_id required"}), 400
+        text = sync_client.pull_remote_scrollback(tid, machine_id)
+        return jsonify({"ok": bool(text), "scrollback": text})
 
-    files = []
-    for name in os.listdir(screenshots):
-        full = os.path.join(screenshots, name)
-        if os.path.isfile(full):
-            files.append((os.path.getmtime(full), full))
-
-    if not files:
-        return jsonify({"ok": False})
-
-    files.sort(reverse=True)
-    return jsonify({"ok": True, "path": files[0][1]})
+    @app.route("/api/latest-screenshot")
+    def api_latest_screenshot():
+        screenshots = os.path.join(os.path.expanduser("~"), "Pictures", "Screenshots")
+        if not os.path.isdir(screenshots):
+            return jsonify({"ok": False})
+        files = []
+        for name in os.listdir(screenshots):
+            full = os.path.join(screenshots, name)
+            if os.path.isfile(full):
+                files.append((os.path.getmtime(full), full))
+        if not files:
+            return jsonify({"ok": False})
+        files.sort(reverse=True)
+        return jsonify({"ok": True, "path": files[0][1]})
 
 
 def _append_scrollback(term, data):
@@ -756,43 +796,152 @@ def _append_scrollback(term, data):
         term["scrollback_len"] -= len(removed)
 
 
-@sock.route("/ws/terminal/<tid>")
-def terminal_ws(ws, tid):
-    """WebSocket bridge: xterm.js <-> PTY."""
-    with terminals_lock:
-        term = terminals.get(tid)
-    if not term:
-        return
+# ---------------------------------------------------------------------------
+# Server-mode routes (cloud sync API)
+# ---------------------------------------------------------------------------
 
-    pty = term["pty"]
+if SERVER_MODE:
+    import base64 as _b64
 
-    # Replay scrollback then subscribe to live output
-    with terminals_lock:
-        for chunk in term["scrollback"]:
-            ws.send(chunk)
-        term["subscribers"].append(ws)
+    @app.route("/api/health")
+    def api_health():
+        return jsonify({"ok": True})
 
-    try:
-        while True:
-            msg = ws.receive()
-            if msg is None:
-                break
-            try:
-                payload = json.loads(msg)
-            except (json.JSONDecodeError, TypeError):
+    @app.route("/api/terminals/sync", methods=["POST"])
+    def api_cloud_sync():
+        """Receive a batch of terminal states from a machine."""
+        data = request.get_json(silent=True) or {}
+        machine_id = data.get("machine_id", "")
+        hostname = data.get("hostname", "")
+        term_list = data.get("terminals", [])
+
+        if not machine_id:
+            return jsonify({"error": "machine_id required"}), 400
+
+        db = get_db()
+        now = time.time()
+
+        db.execute(
+            "INSERT INTO machines (machine_id, hostname, last_seen) VALUES (?, ?, ?) "
+            "ON CONFLICT(machine_id) DO UPDATE SET hostname=excluded.hostname, last_seen=excluded.last_seen",
+            (machine_id, hostname, now),
+        )
+        db.execute("UPDATE cloud_terminals SET alive = 0 WHERE machine_id = ?", (machine_id,))
+
+        for t in term_list:
+            tid = t.get("tid", "")
+            if not tid:
                 continue
-            if payload.get("type") == "input":
-                pty.write(payload.get("data", ""))
-            elif payload.get("type") == "resize":
-                cols = payload.get("cols", 120)
-                rows = payload.get("rows", 30)
-                pty.setwinsize(rows, cols)
-    except Exception:
-        pass
-    finally:
+            sb_b64 = t.get("scrollback", "")
+            sb_blob = _b64.b64decode(sb_b64) if sb_b64 else b""
+            db.execute(
+                """INSERT INTO cloud_terminals (tid, machine_id, label, cwd, task, command,
+                        launch_claude, scrollback, created_at, updated_at, alive)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                   ON CONFLICT(tid, machine_id) DO UPDATE SET
+                        label=excluded.label, cwd=excluded.cwd, task=excluded.task,
+                        command=excluded.command, launch_claude=excluded.launch_claude,
+                        scrollback=excluded.scrollback, created_at=excluded.created_at,
+                        updated_at=excluded.updated_at, alive=1""",
+                (tid, machine_id, t.get("label", ""), t.get("cwd", ""), t.get("task", ""),
+                 t.get("command", ""), t.get("launch_claude", 1),
+                 sb_blob, t.get("created_at", 0), t.get("updated_at", now)),
+            )
+
+        db.commit()
+        return jsonify({"ok": True, "synced": len(term_list)})
+
+    @app.route("/api/terminals")
+    def api_cloud_terminals():
+        """List terminals, optionally filtered. Query: machine_id, exclude, alive_only."""
+        db = get_db()
+        mid = request.args.get("machine_id", "")
+        exclude = request.args.get("exclude", "")
+        alive_only = request.args.get("alive_only", "0") == "1"
+
+        q = "SELECT t.*, m.hostname FROM cloud_terminals t LEFT JOIN machines m ON t.machine_id = m.machine_id WHERE 1=1"
+        p = []
+        if mid:
+            q += " AND t.machine_id = ?"; p.append(mid)
+        if exclude:
+            q += " AND t.machine_id != ?"; p.append(exclude)
+        if alive_only:
+            q += " AND t.alive = 1"
+        q += " ORDER BY t.updated_at DESC"
+
+        rows = db.execute(q, p).fetchall()
+        return jsonify([{
+            "tid": r["tid"], "machine_id": r["machine_id"],
+            "hostname": r["hostname"] or r["machine_id"],
+            "label": r["label"], "cwd": r["cwd"], "task": r["task"],
+            "command": r["command"], "launch_claude": r["launch_claude"],
+            "created_at": r["created_at"], "updated_at": r["updated_at"],
+            "alive": r["alive"],
+        } for r in rows])
+
+    @app.route("/api/terminals/<tid>/scrollback")
+    def api_cloud_scrollback(tid):
+        """Return base64+zlib scrollback for a terminal."""
+        mid = request.args.get("machine_id", "")
+        if not mid:
+            return jsonify({"error": "machine_id required"}), 400
+        db = get_db()
+        row = db.execute(
+            "SELECT scrollback FROM cloud_terminals WHERE tid = ? AND machine_id = ?", (tid, mid)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"ok": True, "scrollback": _b64.b64encode(row["scrollback"]).decode("ascii")})
+
+    @app.route("/api/machines")
+    def api_machines():
+        db = get_db()
+        rows = db.execute("SELECT * FROM machines ORDER BY last_seen DESC").fetchall()
+        return jsonify([dict(r) for r in rows])
+
+
+# ---------------------------------------------------------------------------
+# Desktop-mode WebSocket (only when not in server mode)
+# ---------------------------------------------------------------------------
+
+if not SERVER_MODE:
+    @sock.route("/ws/terminal/<tid>")
+    def terminal_ws(ws, tid):
+        """WebSocket bridge: xterm.js <-> PTY."""
         with terminals_lock:
-            if ws in term.get("subscribers", []):
-                term["subscribers"].remove(ws)
+            term = terminals.get(tid)
+        if not term:
+            return
+
+        pty = term["pty"]
+
+        # Replay scrollback then subscribe to live output
+        with terminals_lock:
+            for chunk in term["scrollback"]:
+                ws.send(chunk)
+            term["subscribers"].append(ws)
+
+        try:
+            while True:
+                msg = ws.receive()
+                if msg is None:
+                    break
+                try:
+                    payload = json.loads(msg)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if payload.get("type") == "input":
+                    pty.write(payload.get("data", ""))
+                elif payload.get("type") == "resize":
+                    cols = payload.get("cols", 120)
+                    rows = payload.get("rows", 30)
+                    pty.setwinsize(rows, cols)
+        except Exception:
+            pass
+        finally:
+            with terminals_lock:
+                if ws in term.get("subscribers", []):
+                    term["subscribers"].remove(ws)
 
 
 # ---------------------------------------------------------------------------
@@ -849,16 +998,42 @@ def _flush_all_scrollback():
         except Exception:
             pass
 
-atexit.register(_flush_all_scrollback)
+if not SERVER_MODE:
+    atexit.register(_flush_all_scrollback)
+
+    def _shutdown_signal(sig, frame):
+        """Handle Ctrl+C: flush scrollback before exiting."""
+        _flush_all_scrollback()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown_signal)
+    signal.signal(signal.SIGTERM, _shutdown_signal)
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
+# Always init DB at import time (needed for gunicorn)
+init_db()
+
 if __name__ == "__main__":
-    init_db()
-    scan_existing_sessions()
-    restore_terminals()
-    print("Claude Session Dashboard running at http://127.0.0.1:8765")
-    app.run(host="127.0.0.1", port=8765, debug=False)
+    if SERVER_MODE:
+        port = int(os.environ.get("PORT", 9876))
+        auth_status = "token required" if SYNC_TOKEN else "NO AUTH (set SYNC_TOKEN)"
+        print(f"Cloud sync server running on http://0.0.0.0:{port}  [{auth_status}]")
+        app.run(host="0.0.0.0", port=port, debug=False)
+    else:
+        scan_existing_sessions()
+        restore_terminals()
+
+        # Start cloud sync if configured
+        sync_enabled = sync_client.configure(SETTINGS_PATH, DB_PATH, SCROLLBACK_DIR)
+        if sync_enabled:
+            sync_client.start()
+            print(f"Cloud sync enabled — machine_id={sync_client._machine_id}")
+        else:
+            print("Cloud sync not configured (set sync_url in settings.json to enable)")
+
+        print("Claude Session Dashboard running at http://127.0.0.1:8765")
+        app.run(host="127.0.0.1", port=8765, debug=False)
