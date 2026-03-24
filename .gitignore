@@ -1,3 +1,5 @@
 dashboard.db
+settings.json
+scrollback/
 __pycache__/
 *.pyc

@@ -26,13 +26,25 @@ def main():
 
     hooks = settings.setdefault("hooks", {})
 
-    command = f"python {HOOK_RECEIVER}"
-    hook_entry = {"type": "command", "command": command}
+    command = f"python {HOOK_RECEIVER.replace(os.sep, '/')}"
+    hook_entry = {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": command}],
+    }
 
     for event in HOOK_EVENTS:
         existing = hooks.get(event, [])
         # Don't add if already configured for this receiver
-        if any("hook_receiver.py" in h.get("command", "") for h in existing):
+        already = False
+        for entry in existing:
+            # Check new format (matcher + hooks array)
+            for h in entry.get("hooks", []):
+                if "hook_receiver.py" in h.get("command", ""):
+                    already = True
+            # Check old format (bare type + command) and migrate
+            if "hook_receiver.py" in entry.get("command", ""):
+                already = True
+        if already:
             continue
         existing.append(hook_entry)
         hooks[event] = existing

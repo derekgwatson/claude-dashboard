@@ -4,17 +4,17 @@ Quick reference for working on this codebase.
 
 ## Project Overview
 
-A minimal local web dashboard for monitoring multiple Claude Code sessions. Shows which sessions are running, waiting for input, or need permission — all in one browser tab.
+A native desktop app (pywebview + Flask) for monitoring multiple Claude Code sessions. Shows which sessions are running, waiting for input, or need permission. Runs as a native window, not a browser tab, so it can bring Windows Terminal to the foreground.
 
 ### Design Philosophy
 
-**Keep it simple.** This is a local-only tool. No auth, no deployment, no frameworks beyond Flask. If something can be done in 20 lines, don't make it 100.
+**Keep it simple.** This is a local-only tool. No auth, no deployment, no frameworks beyond Flask + pywebview. If something can be done in 20 lines, don't make it 100.
 
 ## Architecture
 
 ```
 claude-dashboard/
-├── app.py              # Flask server — routes, DB, hook processing, window focus
+├── app.py              # Flask API (background thread) + pywebview native window
 ├── hook_receiver.py    # Stdin→HTTP bridge for Claude Code hooks (auto-starts dashboard)
 ├── start.py            # One-command setup: installs deps, configures hooks, starts server
 ├── setup_hooks.py      # Merges hook config into ~/.claude/settings.json
@@ -27,11 +27,12 @@ claude-dashboard/
 
 ### How It Works
 
-1. Claude Code fires a hook event → runs `hook_receiver.py` via stdin
-2. `hook_receiver.py` POSTs the JSON payload to `http://127.0.0.1:8765/hook`
-3. If the dashboard isn't running, `hook_receiver.py` auto-starts it
-4. Flask processes the hook, upserts the session in SQLite, stores the raw event
-5. Dashboard polls `/api/sessions` every 2s; attention-needed sessions sort to top
+1. `app.py` starts Flask in a daemon thread (serves API on port 8765) and opens a pywebview native window
+2. Claude Code fires a hook event → runs `hook_receiver.py` via stdin
+3. `hook_receiver.py` POSTs the JSON payload to `http://127.0.0.1:8765/hook`
+4. If the dashboard isn't running, `hook_receiver.py` auto-starts it
+5. Flask processes the hook, upserts the session in SQLite, stores the raw event
+6. Dashboard polls `/api/sessions` every 2s; attention-needed sessions sort to top
 
 ### Hook Events Handled
 
@@ -48,11 +49,11 @@ claude-dashboard/
 
 ### Session Discovery
 
-On startup, `app.py` scans `~/.claude/sessions/*.json` to find existing Claude Code sessions. Uses Windows `OpenProcess` API (or `os.kill` on Unix) to check which PIDs are still alive. Discovered sessions default to `waiting_input` since their state is unknown.
+On startup, `app.py` scans `~/.claude/sessions/*.json` to find existing Claude Code sessions. Uses `QueryFullProcessImageNameW` to verify PIDs are actually node/claude processes (not recycled PIDs). Purges stale sessions from the DB that no longer have a live session file.
 
 ### Window Focus ("Find" Button)
 
-Uses `AttachConsole(pid)` → `GetConsoleWindow()` to find the HWND for each session's terminal tab, then `FlashWindowEx` to flash it in the taskbar. Full foreground switching is blocked by Windows focus-stealing prevention — flashing is the best available option.
+Uses `EnumWindows` to find the Windows Terminal window, then `SetForegroundWindow` to bring it to the foreground. Uses the Alt-key trick (`keybd_event`) to bypass the foreground-lock. Since WT hosts all tabs in one window, this brings WT forward — the dashboard labels tell the user which tab is which.
 
 ## Data Model
 

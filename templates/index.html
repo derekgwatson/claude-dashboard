@@ -3,14 +3,55 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Session Dashboard</title>
+    <title>Claude Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <h1>Claude Session Dashboard</h1>
-    <div id="sessions">
-        <p class="empty">Loading sessions...</p>
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <h1>Claude Dashboard</h1>
+            <button id="new-term-btn" title="New Claude session">+</button>
+        </div>
+        <div id="favorites"></div>
+        <div id="terminal-tabs"></div>
+        <div class="font-size-control">
+            <span>Font size</span>
+            <div class="font-size-btns">
+                <button id="font-decrease">-</button>
+                <span id="font-size-value">16</span>
+                <button id="font-increase">+</button>
+            </div>
+        </div>
+        <div class="shortcuts">
+            <div>Ctrl+Shift+S <span>Latest screenshot</span></div>
+            <div>Ctrl+Shift+F <span>Browse files</span></div>
+            <div>Ctrl+Shift+V <span>Paste</span></div>
+        </div>
     </div>
+    <div class="main">
+        <div id="terminal-path-bar"></div>
+        <div id="terminal-container"></div>
+        <div id="empty-state">
+            <p>No sessions open</p>
+            <button id="new-term-cta">Launch Claude Session</button>
+        </div>
+    </div>
+
+    <!-- Project picker modal -->
+    <div id="picker-overlay" class="picker-overlay hidden">
+        <div class="picker">
+            <div class="picker-header">
+                <h2>Launch Claude in...</h2>
+                <button id="picker-close">&times;</button>
+            </div>
+            <input id="picker-search" type="text" placeholder="Filter projects..." autocomplete="off">
+            <div id="picker-list" class="picker-list"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>
