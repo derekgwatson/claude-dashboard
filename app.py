@@ -1,5 +1,6 @@
 """Claude Session Dashboard — terminal multiplexer + session monitor."""
 
+import atexit
 import ctypes
 import glob
 import json
@@ -819,8 +820,8 @@ def restore_terminals():
         create_terminal(
             label=row["label"],
             cwd=cwd,
-            launch_claude=False,
-            command=None,
+            launch_claude=launch_claude,
+            command=command,
             tid=tid,
             old_scrollback=old_scrollback,
         )
@@ -833,6 +834,22 @@ def restore_terminals():
     count = len(rows)
     if count:
         print(f"Restored {count} terminal(s) from previous session")
+
+
+# ---------------------------------------------------------------------------
+# Shutdown — flush all scrollback so it survives restart
+# ---------------------------------------------------------------------------
+
+def _flush_all_scrollback():
+    with terminals_lock:
+        snapshot = [(tid, list(t["scrollback"])) for tid, t in terminals.items()]
+    for tid, chunks in snapshot:
+        try:
+            _save_scrollback(tid, chunks)
+        except Exception:
+            pass
+
+atexit.register(_flush_all_scrollback)
 
 
 # ---------------------------------------------------------------------------

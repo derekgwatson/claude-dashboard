@@ -357,7 +357,14 @@ function connectTerminal(tid, label, cwd) {
 
     ws.onopen = () => {
         setTimeout(() => {
-            if (terminals[tid]) terminals[tid].fitAddon.fit();
+            if (terminals[tid]) {
+                terminals[tid].fitAddon.fit();
+                // Explicitly send resize so the PTY matches xterm's actual dimensions.
+                // fit() only fires onResize if the size changed since last fit, but
+                // we already called fit() before the WS was open, so the event was lost.
+                const { cols, rows } = terminals[tid].term;
+                ws.send(JSON.stringify({ type: "resize", cols, rows }));
+            }
         }, 100);
     };
 
