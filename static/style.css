@@ -1,0 +1,132 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    padding: 20px;
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+h1 {
+    font-size: 1.3rem;
+    color: #8888cc;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #333;
+}
+
+.empty {
+    color: #666;
+    padding: 40px;
+    text-align: center;
+}
+
+.session {
+    background: #16213e;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin-bottom: 10px;
+    transition: background 0.2s;
+}
+
+.session.attention {
+    background: #2e1a1a;
+    border-color: #cc4444;
+    box-shadow: 0 0 8px rgba(204, 68, 68, 0.3);
+}
+
+.session-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.session-id {
+    font-size: 0.75rem;
+    color: #666;
+    font-family: monospace;
+}
+
+.session-label {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #ccc;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 2px 6px;
+    cursor: pointer;
+    min-width: 120px;
+}
+
+.session-label:hover { border-color: #555; }
+.session-label:focus { border-color: #8888cc; outline: none; color: #fff; }
+
+.status {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.status-running          { background: #1a3a1a; color: #4caf50; }
+.status-waiting_input    { background: #3a3a1a; color: #ffb300; }
+.status-permission_needed { background: #3a1a1a; color: #ef5350; }
+.status-idle             { background: #1a1a2e; color: #666; }
+.status-done             { background: #1a1a2e; color: #555; }
+
+.session.done {
+    opacity: 0.5;
+}
+
+.session-details {
+    display: flex;
+    gap: 20px;
+    font-size: 0.82rem;
+    color: #888;
+    margin-top: 6px;
+}
+
+.session-details span { white-space: nowrap; }
+.detail-label { color: #555; }
+
+.last-message {
+    margin-top: 6px;
+    font-size: 0.82rem;
+    color: #999;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+.dismiss-btn {
+    background: none;
+    border: 1px solid #cc4444;
+    color: #cc4444;
+    padding: 2px 10px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    margin-left: 10px;
+}
+
+.dismiss-btn:hover { background: #cc4444; color: #fff; }
+
+.focus-btn {
+    background: none;
+    border: 1px solid #8888cc;
+    color: #8888cc;
+    padding: 2px 10px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    margin-right: 8px;
+}
+
+.focus-btn:hover { background: #8888cc; color: #fff; }
