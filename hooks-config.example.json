@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "type": "command", "command": "python /path/to/claude-dashboard/hook_receiver.py" }
+    ],
+    "Notification": [
+      { "type": "command", "command": "python /path/to/claude-dashboard/hook_receiver.py" }
+    ],
+    "SubagentStart": [
+      { "type": "command", "command": "python /path/to/claude-dashboard/hook_receiver.py" }
+    ],
+    "SubagentStop": [
+      { "type": "command", "command": "python /path/to/claude-dashboard/hook_receiver.py" }
+    ],
+    "Stop": [
+      { "type": "command", "command": "python /path/to/claude-dashboard/hook_receiver.py" }
+    ],
+    "UserPromptSubmit": [
+      { "type": "command", "command": "python /path/to/claude-dashboard/hook_receiver.py" }
+    ],
+    "SessionEnd": [
+      { "type": "command", "command": "python /path/to/claude-dashboard/hook_receiver.py" }
+    ]
+  }
+}
