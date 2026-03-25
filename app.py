@@ -245,22 +245,29 @@ def scan_existing_sessions():
             )
 
     for session_id, data in session_file_data.items():
-        existing = db.execute(
-            "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
-        ).fetchone()
-        if existing:
-            continue
-
         cwd = data.get("cwd", "").replace("\\", "/")
         started_at = data.get("startedAt", 0)
         repo = repo_from_cwd(cwd)
         updated_at = started_at / 1000.0 if started_at > 1e12 else started_at
 
-        db.execute(
-            "INSERT INTO sessions (session_id, pid, cwd, repo, status, needs_attention, last_message, updated_at) "
-            "VALUES (?, ?, ?, ?, 'running', 0, 'Discovered on startup', ?)",
-            (session_id, data.get("pid", 0), cwd, repo, updated_at),
-        )
+        existing = db.execute(
+            "SELECT status FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+
+        if existing:
+            # Re-activate sessions that were marked done but are still alive
+            if existing["status"] == "done":
+                db.execute(
+                    "UPDATE sessions SET status = 'running', needs_attention = 0, updated_at = ? "
+                    "WHERE session_id = ?",
+                    (now_ts(), session_id),
+                )
+        else:
+            db.execute(
+                "INSERT INTO sessions (session_id, pid, cwd, repo, status, needs_attention, last_message, updated_at) "
+                "VALUES (?, ?, ?, ?, 'running', 0, 'Discovered on startup', ?)",
+                (session_id, data.get("pid", 0), cwd, repo, updated_at),
+            )
 
     db.commit()
     db.close()
@@ -683,16 +690,13 @@ def _periodic_rescan():
                         (now, sid),
                     )
 
-            # Mark non-done sessions as done if:
-            # - their process is gone, OR
-            # - they haven't received a hook in 10 minutes (orphaned PID)
+            # Mark non-done sessions as done if their process is gone
             active_rows = db.execute(
-                "SELECT session_id, updated_at FROM sessions WHERE status NOT IN ('done')"
+                "SELECT session_id FROM sessions WHERE status NOT IN ('done')"
             ).fetchall()
             for row in active_rows:
                 sid = row["session_id"]
-                stale = (now - row["updated_at"]) > 600  # 10 minutes without a hook
-                if sid not in live_sessions or stale:
+                if sid not in live_sessions:
                     db.execute(
                         "UPDATE sessions SET status = 'done', needs_attention = 0, "
                         "last_message = 'Session ended', updated_at = ? "
