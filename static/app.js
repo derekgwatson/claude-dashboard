@@ -318,7 +318,8 @@ function connectTerminal(tid, label, cwd) {
 
     const term = new Terminal({
         cursorBlink: true,
-        scrollback: 50000,
+        scrollback: 5000,
+        fastScrollModifier: "alt",
         fontSize: currentFontSize,
         fontFamily: "'Cascadia Code', 'Consolas', monospace",
         theme: {
@@ -351,8 +352,37 @@ function connectTerminal(tid, label, cwd) {
     const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${wsProto}//${location.host}/ws/terminal/${tid}`);
 
+    // Batch incoming PTY data and flush once per animation frame.
+    // During large bursts (Claude TUI redraws), hide the terminal briefly
+    // so the user sees a quick blink instead of chaotic scrolling.
+    let writeBuf = "";
+    let writeRaf = 0;
+    let burstBytes = 0;
+    let burstTimer = 0;
+    const BURST_THRESHOLD = 4000;  // bytes in a short window to trigger hide
+    const BURST_SETTLE = 150;      // ms of quiet before showing again
+
     ws.onmessage = (event) => {
-        term.write(event.data);
+        writeBuf += event.data;
+        burstBytes += event.data.length;
+
+        // If a lot of data arrives quickly, hide terminal until it settles
+        if (burstBytes > BURST_THRESHOLD) {
+            wrapEl.style.opacity = "0";
+        }
+        clearTimeout(burstTimer);
+        burstTimer = setTimeout(() => {
+            burstBytes = 0;
+            wrapEl.style.opacity = "1";
+        }, BURST_SETTLE);
+
+        if (!writeRaf) {
+            writeRaf = requestAnimationFrame(() => {
+                term.write(writeBuf);
+                writeBuf = "";
+                writeRaf = 0;
+            });
+        }
     };
 
     ws.onopen = () => {
@@ -453,6 +483,7 @@ function connectTerminal(tid, label, cwd) {
     tabEl.dataset.tid = tid;
     tabEl.innerHTML = `
         <div class="tab-header">
+            <span class="tab-status" data-tid="${escHtml(tid)}"></span>
             <span class="tab-label">${escHtml(tabLabel)}</span>
             <button class="tab-desc-toggle" title="Toggle description">&#9662;</button>
             <button class="tab-close">&times;</button>
@@ -692,6 +723,37 @@ terminalTabs?.addEventListener("keydown", (e) => {
         }
     }
 });
+
+// ---------------------------------------------------------------------------
+// Poll session status for sidebar indicators
+// ---------------------------------------------------------------------------
+
+const STATUS_LABELS = {
+    running: "Working",
+    waiting_input: "Waiting for input",
+    permission_needed: "Needs permission",
+    done: "Done",
+};
+
+async function pollTerminalStatuses() {
+    try {
+        const resp = await fetch("/api/terminal-statuses");
+        const statuses = await resp.json();  // {tid: status, ...}
+        for (const [tid, status] of Object.entries(statuses)) {
+            const dot = document.querySelector(`.tab-status[data-tid="${CSS.escape(tid)}"]`);
+            if (!dot) continue;
+            dot.className = "tab-status";
+            if (status) {
+                dot.classList.add(`status-${status}`);
+                dot.title = STATUS_LABELS[status] || status;
+            } else {
+                dot.title = "";
+            }
+        }
+    } catch (e) {}
+}
+
+setInterval(pollTerminalStatuses, 2000);
 
 // ---------------------------------------------------------------------------
 // Remote terminals (from other machines via cloud sync)

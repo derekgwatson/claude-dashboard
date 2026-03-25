@@ -362,7 +362,7 @@ def process_hook(payload):
 
         # Link this Claude session to its dashboard terminal by matching cwd
         transcript_path = payload.get("transcript_path", "")
-        tid = find_terminal_by_cwd(cwd)
+        tid = find_terminal_by_cwd(cwd, session_id=session_id)
         if tid:
             tdb = sqlite3.connect(DB_PATH)
             tdb.execute(
@@ -489,14 +489,83 @@ def extract_compact_summary(transcript_path):
         return ""
 
 
-def find_terminal_by_cwd(cwd):
-    """Return terminal ID if one already exists for this cwd, else None."""
+def find_terminal_by_cwd(cwd, session_id=None):
+    """Return terminal ID for this cwd, preferring unlinked terminals.
+
+    When multiple terminals share the same cwd, prefer one that hasn't already
+    been linked to a different Claude session.  If *session_id* is given, also
+    check whether the Claude process is a child of the terminal's PTY.
+    """
     normalized = os.path.normpath(cwd).lower()
+    pid = find_pid_for_session(session_id) if session_id else 0
+
     with terminals_lock:
+        unlinked = None
+        fallback = None
         for tid, t in terminals.items():
-            if os.path.normpath(t["cwd"]).lower() == normalized and t["pty"].isalive():
+            if os.path.normpath(t["cwd"]).lower() != normalized or not t["pty"].isalive():
+                continue
+            # If we know the Claude PID, check if it's a child of this PTY
+            if pid and _is_child_of_pty(pid, t["pty"]):
                 return tid
+            # Prefer terminals not yet linked to a session
+            if not t.get("claude_session_id"):
+                unlinked = unlinked or tid
+            else:
+                fallback = fallback or tid
+        return unlinked or fallback
     return None
+
+
+def _is_child_of_pty(child_pid, pty):
+    """Check if child_pid is a descendant of the PTY's process."""
+    try:
+        pty_pid = pty.pid
+        # Walk parent chain from child_pid up to see if we hit pty_pid
+        import ctypes
+        from ctypes import wintypes
+        TH32CS_SNAPPROCESS = 0x00000002
+
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_char * 260),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snap == -1:
+            return False
+
+        # Build pid -> parent_pid map
+        parent_map = {}
+        pe = PROCESSENTRY32()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        if kernel32.Process32First(snap, ctypes.byref(pe)):
+            parent_map[pe.th32ProcessID] = pe.th32ParentProcessID
+            while kernel32.Process32Next(snap, ctypes.byref(pe)):
+                parent_map[pe.th32ProcessID] = pe.th32ParentProcessID
+        kernel32.CloseHandle(snap)
+
+        # Walk up from child_pid
+        current = child_pid
+        visited = set()
+        while current and current not in visited:
+            if current == pty_pid:
+                return True
+            visited.add(current)
+            current = parent_map.get(current, 0)
+        return False
+    except Exception:
+        return False
 
 
 def discover_projects():
@@ -681,6 +750,16 @@ if not SERVER_MODE:
         )
         db.commit()
         return jsonify({"ok": True})
+
+    @app.route("/api/terminal-statuses")
+    def api_terminal_statuses():
+        """Lightweight status endpoint — DB only, no terminals_lock."""
+        db = get_db()
+        rows = db.execute(
+            "SELECT t.tid, COALESCE(s.status, '') as session_status "
+            "FROM terminals t LEFT JOIN sessions s ON t.claude_session_id = s.session_id"
+        ).fetchall()
+        return jsonify({r["tid"]: r["session_status"] for r in rows})
 
     @app.route("/api/projects")
     def api_projects():

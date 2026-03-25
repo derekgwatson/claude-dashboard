@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Claude Dashboard</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -25,6 +25,12 @@
             </div>
         </div>
         <div id="sync-status"></div>
+        <div class="status-legend">
+            <div><span class="legend-dot status-running"></span>Working</div>
+            <div><span class="legend-dot status-waiting_input"></span>Waiting for input</div>
+            <div><span class="legend-dot status-permission_needed"></span>Needs permission</div>
+            <div><span class="legend-dot status-done"></span>Done</div>
+        </div>
         <div class="shortcuts">
             <div>Ctrl+Shift+S <span>Latest screenshot</span></div>
             <div>Ctrl+Shift+F <span>Browse files</span></div>
@@ -52,8 +58,8 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

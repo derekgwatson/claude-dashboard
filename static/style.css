@@ -177,6 +177,39 @@ body {
 }
 .tab-desc-toggle:hover { color: #8b949e; }
 
+.tab-status {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-right: 6px;
+    background: transparent;
+}
+
+.tab-status.status-running {
+    background: #3fb950;
+    box-shadow: 0 0 4px rgba(63, 185, 80, 0.4);
+}
+
+.tab-status.status-waiting_input {
+    background: #d29922;
+}
+
+.tab-status.status-permission_needed {
+    background: #f85149;
+    animation: status-flash 0.7s ease-in-out infinite;
+}
+
+.tab-status.status-done {
+    background: #484f58;
+}
+
+@keyframes status-flash {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.25; }
+}
+
 .tab-close {
     background: none;
     border: none;
@@ -253,6 +286,32 @@ body {
     color: #c9d1d9;
 }
 
+/* Status legend */
+
+.status-legend {
+    border-top: 1px solid #30363d;
+    padding: 8px 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    font-size: 0.65rem;
+    color: #484f58;
+}
+
+.status-legend div {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.legend-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
 /* Shortcut hints */
 
 .shortcuts {
@@ -314,6 +373,7 @@ body {
     position: absolute;
     inset: 0;
     padding: 4px;
+    transition: opacity 0.08s ease-out;
 }
 
 .terminal-wrap .xterm {
