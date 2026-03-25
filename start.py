@@ -22,8 +22,7 @@ def check_deps():
     """Install missing dependencies."""
     try:
         importlib.import_module("flask")
-        importlib.import_module("flask_sock")
-        importlib.import_module("winpty")
+        importlib.import_module("requests")
     except ImportError:
         print("Installing dependencies...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-r",
