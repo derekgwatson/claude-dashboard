@@ -307,12 +307,15 @@ def send_toast(title, message):
 
     def _do_toast():
         try:
-            from winotify import Notification
+            from winotify import Notification, audio
+            icon = os.path.join(_DIR, "static", "icon-192.png")
             toast = Notification(
                 app_id="Claude Dashboard",
                 title=title,
                 msg=message,
+                icon=icon if os.path.exists(icon) else "",
             )
+            toast.set_audio(audio.Default, loop=False)
             toast.show()
         except Exception:
             pass
