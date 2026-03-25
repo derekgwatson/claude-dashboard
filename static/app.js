@@ -44,11 +44,20 @@ function renderSessions() {
     }
     emptyState.style.display = "none";
 
-    // Filter out old done sessions (> 1 hour)
-    const now = Date.now() / 1000;
-    const visible = sessions.filter(s =>
-        s.status !== "done" || (now - s.updated_at) < 3600
-    );
+    // Only show active sessions, deduplicated by cwd (keep most recent)
+    const active = sessions.filter(s => s.status !== "done");
+    const byCwd = {};
+    for (const s of active) {
+        const key = (s.cwd || "").replace(/\//g, "\\").toLowerCase();
+        if (!byCwd[key] || s.updated_at > byCwd[key].updated_at) {
+            byCwd[key] = s;
+        }
+    }
+    const visible = Object.values(byCwd).sort((a, b) => {
+        // Attention first, then by updated_at
+        if (a.needs_attention !== b.needs_attention) return b.needs_attention - a.needs_attention;
+        return b.updated_at - a.updated_at;
+    });
 
     if (visible.length === 0) {
         sessionsContainer.innerHTML = "";
@@ -73,7 +82,6 @@ function renderSessions() {
             <div class="session-path">${escHtml(s.cwd || "")}</div>
             <div class="session-message">${escHtml(s.last_message || "")}</div>
             <div class="session-actions">
-                ${s.needs_attention ? `<button class="btn-dismiss" data-sid="${escHtml(s.session_id)}">Dismiss</button>` : ""}
                 ${status !== "done" ? `<button class="btn-label" data-sid="${escHtml(s.session_id)}">Rename</button>` : ""}
             </div>
         </div>`;
@@ -109,15 +117,6 @@ function escHtml(str) {
 // ---------------------------------------------------------------------------
 
 sessionsContainer.addEventListener("click", (e) => {
-    // Dismiss button
-    const dismissBtn = e.target.closest(".btn-dismiss");
-    if (dismissBtn) {
-        e.stopPropagation();
-        const sid = dismissBtn.dataset.sid;
-        fetch(`/api/sessions/${sid}/dismiss`, { method: "POST" }).then(() => pollSessions());
-        return;
-    }
-
     // Rename button
     const labelBtn = e.target.closest(".btn-label");
     if (labelBtn) {

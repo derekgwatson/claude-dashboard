@@ -457,15 +457,6 @@ if not SERVER_MODE:
         db.commit()
         return jsonify({"ok": True})
 
-    @app.route("/api/sessions/<session_id>/dismiss", methods=["POST"])
-    def dismiss_session(session_id):
-        db = get_db()
-        db.execute(
-            "UPDATE sessions SET needs_attention = 0, status = 'idle', updated_at = ? WHERE session_id = ?",
-            (now_ts(), session_id),
-        )
-        db.commit()
-        return jsonify({"ok": True})
 
     @app.route("/api/settings", methods=["GET", "PUT"])
     def api_settings():
@@ -617,6 +608,98 @@ if SERVER_MODE:
 
 
 # ---------------------------------------------------------------------------
+# Periodic session rescan (catches stale statuses)
+# ---------------------------------------------------------------------------
+
+RESCAN_INTERVAL = 15  # seconds
+
+
+def _periodic_rescan():
+    """Background thread: re-check session files to fix stale statuses.
+
+    Claude Code doesn't fire a hook when the user approves a permission
+    prompt, so a session can stay stuck at "permission_needed" forever.
+    This thread re-scans ~/.claude/sessions/ and marks stale attention
+    sessions as "running" if they're still alive, or "done" if they've
+    exited.
+    """
+    while True:
+        time.sleep(RESCAN_INTERVAL)
+        try:
+            sessions_dir = os.path.join(CLAUDE_DIR, "sessions")
+            if not os.path.isdir(sessions_dir):
+                continue
+
+            # Build set of session IDs that have a session file with a live PID
+            live_sessions = {}
+            for filepath in glob.glob(os.path.join(sessions_dir, "*.json")):
+                try:
+                    with open(filepath) as f:
+                        data = json.load(f)
+                    sid = data.get("sessionId", "")
+                    pid = data.get("pid", 0)
+                    if sid and pid and pid_alive(pid):
+                        live_sessions[sid] = data
+                except (json.JSONDecodeError, OSError):
+                    continue
+
+            db = sqlite3.connect(DB_PATH)
+            db.row_factory = sqlite3.Row
+            now = now_ts()
+
+            # Fix stale attention states: if a session needs attention but
+            # has been in that state for >30s and is still alive, it's
+            # probably running (user approved the permission in their terminal)
+            stale_rows = db.execute(
+                "SELECT session_id, status, updated_at FROM sessions "
+                "WHERE needs_attention = 1 AND status IN ('permission_needed', 'waiting_input') "
+                "AND updated_at < ?",
+                (now - 30,),
+            ).fetchall()
+
+            for row in stale_rows:
+                sid = row["session_id"]
+                if sid in live_sessions:
+                    # Still alive — assume running
+                    db.execute(
+                        "UPDATE sessions SET status = 'running', needs_attention = 0, "
+                        "last_message = 'Running (resumed)', updated_at = ? "
+                        "WHERE session_id = ?",
+                        (now, sid),
+                    )
+                else:
+                    # Process gone — mark done
+                    db.execute(
+                        "UPDATE sessions SET status = 'done', needs_attention = 0, "
+                        "last_message = 'Session ended', updated_at = ? "
+                        "WHERE session_id = ?",
+                        (now, sid),
+                    )
+
+            # Mark non-done sessions as done if:
+            # - their process is gone, OR
+            # - they haven't received a hook in 10 minutes (orphaned PID)
+            active_rows = db.execute(
+                "SELECT session_id, updated_at FROM sessions WHERE status NOT IN ('done')"
+            ).fetchall()
+            for row in active_rows:
+                sid = row["session_id"]
+                stale = (now - row["updated_at"]) > 600  # 10 minutes without a hook
+                if sid not in live_sessions or stale:
+                    db.execute(
+                        "UPDATE sessions SET status = 'done', needs_attention = 0, "
+                        "last_message = 'Session ended', updated_at = ? "
+                        "WHERE session_id = ?",
+                        (now, sid),
+                    )
+
+            db.commit()
+            db.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -631,6 +714,9 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=port, debug=False)
     else:
         scan_existing_sessions()
+
+        # Start background rescan thread
+        threading.Thread(target=_periodic_rescan, daemon=True).start()
 
         # Start cloud sync if configured
         sync_enabled = sync_client.configure(SETTINGS_PATH, DB_PATH, "")

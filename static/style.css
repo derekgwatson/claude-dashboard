@@ -141,8 +141,8 @@ body {
 }
 
 .session-status.status-running {
-    background: #3fb950;
-    box-shadow: 0 0 6px rgba(63, 185, 80, 0.4);
+    background: #58a6ff;
+    box-shadow: 0 0 6px rgba(88, 166, 255, 0.4);
 }
 
 .session-status.status-waiting_input {
@@ -155,7 +155,8 @@ body {
 }
 
 .session-status.status-done {
-    background: #484f58;
+    background: #3fb950;
+    box-shadow: 0 0 6px rgba(63, 185, 80, 0.4);
 }
 
 .session-status.status-idle {
@@ -215,7 +216,7 @@ body {
 
 .session-actions:empty { display: none; margin: 0; }
 
-.btn-dismiss, .btn-label {
+.btn-label {
     background: #21262d;
     border: 1px solid #30363d;
     color: #c9d1d9;
@@ -225,7 +226,6 @@ body {
     cursor: pointer;
 }
 
-.btn-dismiss:hover { background: #30363d; border-color: #f85149; color: #f85149; }
 .btn-label:hover { background: #30363d; }
 
 /* ---------------------------------------------------------------------------

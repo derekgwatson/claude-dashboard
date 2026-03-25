@@ -88,7 +88,6 @@ SQLite database at `dashboard.db` (gitignored). Created automatically on first r
 | POST | `/hook` | Receive hook events |
 | GET | `/api/sessions` | All sessions (sorted: attention first, then by updated_at) |
 | PUT | `/api/sessions/<id>/label` | Update session label |
-| POST | `/api/sessions/<id>/dismiss` | Clear attention flag, set status=idle |
 | GET | `/api/settings` | Get dashboard settings |
 | PUT | `/api/settings` | Update dashboard settings |
 
