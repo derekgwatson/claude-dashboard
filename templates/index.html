@@ -11,21 +11,18 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="sidebar">
-        <div class="sidebar-header">
-            <h1>Claude Dashboard</h1>
-        </div>
-        <div id="remote-section"></div>
-        <div id="sync-status"></div>
-        <div class="status-legend">
-            <div><span class="legend-dot" style="background:#58a6ff"></span>Working</div>
-            <div><span class="legend-dot" style="background:#d29922"></span>Waiting for input</div>
-            <div><span class="legend-dot" style="background:#f85149"></span>Needs permission</div>
-            <div><span class="legend-dot" style="background:#3fb950"></span>Done</div>
-        </div>
-    </div>
     <div class="main">
         <div id="sessions-container"></div>
+        <div id="remote-section"></div>
+        <div class="statusbar">
+            <div class="status-legend">
+                <div><span class="legend-dot" style="background:#58a6ff"></span>Working</div>
+                <div><span class="legend-dot" style="background:#d29922"></span>Waiting for input</div>
+                <div><span class="legend-dot" style="background:#f85149"></span>Needs permission</div>
+                <div><span class="legend-dot" style="background:#3fb950"></span>Done</div>
+            </div>
+            <div id="sync-status"></div>
+        </div>
         <div id="empty-state">
             <p>No sessions yet</p>
             <p class="hint">Sessions appear automatically when Claude Code fires a hook</p>
@@ -35,7 +32,7 @@
     <script src="/static/app.js"></script>
     <script>
         if ("serviceWorker" in navigator) {
-            navigator.serviceWorker.register("/static/sw.js");
+            navigator.serviceWorker.register("/sw.js");
         }
     </script>
 </body>

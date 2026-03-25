@@ -10,58 +10,6 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
-   Sidebar
-   --------------------------------------------------------------------------- */
-
-.sidebar {
-    width: 220px;
-    min-width: 220px;
-    background: #161b22;
-    border-right: 1px solid #30363d;
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-}
-
-.sidebar-header {
-    padding: 14px 16px;
-    border-bottom: 1px solid #30363d;
-}
-
-.sidebar-header h1 {
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: #8b949e;
-}
-
-/* Status legend */
-
-.status-legend {
-    margin-top: auto;
-    border-top: 1px solid #30363d;
-    padding: 10px 16px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px 12px;
-    font-size: 0.65rem;
-    color: #484f58;
-}
-
-.status-legend div {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-}
-
-.legend-dot {
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-}
-
-/* ---------------------------------------------------------------------------
    Main area — session cards
    --------------------------------------------------------------------------- */
 
@@ -72,8 +20,49 @@ body {
     position: relative;
     min-width: 0;
     overflow-y: auto;
-    padding: 16px;
+    padding: 16px 16px 40px;
     gap: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+   Status bar (bottom)
+   --------------------------------------------------------------------------- */
+
+.statusbar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 32px;
+    background: #161b22;
+    border-top: 1px solid #30363d;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    font-size: 0.7rem;
+    color: #b1bac4;
+    z-index: 10;
+}
+
+.status-legend {
+    display: flex;
+    gap: 14px;
+}
+
+.status-legend div {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+
+.legend-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
 }
 
 #sessions-container {
@@ -90,7 +79,7 @@ body {
     align-items: center;
     justify-content: center;
     gap: 8px;
-    color: #484f58;
+    color: #b1bac4;
 }
 
 #empty-state p { font-size: 1rem; }
@@ -180,14 +169,14 @@ body {
 
 .session-age {
     font-size: 0.75rem;
-    color: #484f58;
+    color: #b1bac4;
     flex-shrink: 0;
     font-family: "Cascadia Code", "Consolas", monospace;
 }
 
 .session-path {
     font-size: 0.75rem;
-    color: #484f58;
+    color: #b1bac4;
     font-family: "Cascadia Code", "Consolas", monospace;
     margin-bottom: 4px;
     overflow: hidden;
@@ -199,7 +188,7 @@ body {
 
 .session-message {
     font-size: 0.8rem;
-    color: #8b949e;
+    color: #b1bac4;
     line-height: 1.4;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -208,25 +197,6 @@ body {
 
 .session-message:empty { display: none; }
 
-.session-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
-}
-
-.session-actions:empty { display: none; margin: 0; }
-
-.btn-label {
-    background: #21262d;
-    border: 1px solid #30363d;
-    color: #c9d1d9;
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    cursor: pointer;
-}
-
-.btn-label:hover { background: #30363d; }
 
 /* ---------------------------------------------------------------------------
    Remote terminals
@@ -242,7 +212,7 @@ body {
 .remote-label {
     padding: 8px 16px 4px;
     font-size: 0.7rem;
-    color: #484f58;
+    color: #b1bac4;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     font-weight: 600;
@@ -251,7 +221,7 @@ body {
 .remote-machine {
     padding: 4px 16px 2px;
     font-size: 0.7rem;
-    color: #8b949e;
+    color: #b1bac4;
     font-weight: 500;
 }
 
@@ -296,7 +266,7 @@ body {
 .sync-info {
     padding: 6px 16px;
     font-size: 0.7rem;
-    color: #484f58;
+    color: #b1bac4;
     display: flex;
     align-items: center;
     gap: 6px;

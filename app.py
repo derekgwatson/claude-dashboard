@@ -390,7 +390,11 @@ def process_hook(payload):
     elif hook_type == "UserPromptSubmit":
         fields["status"] = "running"
         fields["needs_attention"] = 0
-        fields["last_message"] = "Processing prompt..."
+        prompt = payload.get("prompt", "")
+        # Ensure clean UTF-8 before truncating
+        prompt = prompt.encode("utf-8", errors="replace").decode("utf-8")
+        snippet = (prompt[:80] + "...") if len(prompt) > 80 else prompt
+        fields["last_message"] = snippet or "Processing prompt..."
 
     elif hook_type == "SessionEnd":
         fields["status"] = "done"
@@ -428,6 +432,10 @@ if not SERVER_MODE:
     @app.route("/")
     def index():
         return render_template("index.html")
+
+    @app.route("/sw.js")
+    def service_worker():
+        return app.send_static_file("sw.js")
 
     @app.route("/hook", methods=["POST"])
     def hook():
@@ -660,11 +668,10 @@ def _periodic_rescan():
             for row in stale_rows:
                 sid = row["session_id"]
                 if sid in live_sessions:
-                    # Still alive — assume running
+                    # Still alive — assume running, keep existing message
                     db.execute(
                         "UPDATE sessions SET status = 'running', needs_attention = 0, "
-                        "last_message = 'Running (resumed)', updated_at = ? "
-                        "WHERE session_id = ?",
+                        "updated_at = ? WHERE session_id = ?",
                         (now, sid),
                     )
                 else:

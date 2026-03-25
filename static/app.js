@@ -81,9 +81,6 @@ function renderSessions() {
             </div>
             <div class="session-path">${escHtml(s.cwd || "")}</div>
             <div class="session-message">${escHtml(s.last_message || "")}</div>
-            <div class="session-actions">
-                ${status !== "done" ? `<button class="btn-label" data-sid="${escHtml(s.session_id)}">Rename</button>` : ""}
-            </div>
         </div>`;
     }).join("");
 }
@@ -116,30 +113,34 @@ function escHtml(str) {
 // Event handlers
 // ---------------------------------------------------------------------------
 
-sessionsContainer.addEventListener("click", (e) => {
-    // Rename button
-    const labelBtn = e.target.closest(".btn-label");
-    if (labelBtn) {
-        e.stopPropagation();
-        const sid = labelBtn.dataset.sid;
-        const session = sessions.find(s => s.session_id === sid);
-        const current = session?.label || session?.repo || "";
-        const newLabel = prompt("Session label:", current);
-        if (newLabel !== null) {
-            fetch(`/api/sessions/${sid}/label`, {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ label: newLabel }),
-            }).then(() => pollSessions());
-        }
-        return;
-    }
+let clickTimer = null;
 
-    // Card selection
+sessionsContainer.addEventListener("click", (e) => {
     const card = e.target.closest(".session-card");
-    if (card) {
+    if (!card) return;
+
+    // Delay click to allow dblclick to cancel it
+    clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => {
         selectedSessionId = card.dataset.sid;
         renderSessions();
+    }, 250);
+});
+
+sessionsContainer.addEventListener("dblclick", (e) => {
+    clearTimeout(clickTimer);
+    const card = e.target.closest(".session-card");
+    if (!card) return;
+    const sid = card.dataset.sid;
+    const session = sessions.find(s => s.session_id === sid);
+    const current = session?.label || session?.repo || "";
+    const newLabel = prompt("Session label:", current);
+    if (newLabel !== null) {
+        fetch(`/api/sessions/${sid}/label`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ label: newLabel }),
+        }).then(() => pollSessions());
     }
 });
 
