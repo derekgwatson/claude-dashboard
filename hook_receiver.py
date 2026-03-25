@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """Hook receiver script for Claude Code.
 
-Reads JSON from stdin and hands it off to a background process that POSTs
-it to the dashboard server. Returns immediately so it never blocks Claude
-Code's terminal rendering.
+Reads JSON from stdin and POSTs it directly to the dashboard server.
+Uses a short timeout so it doesn't block Claude Code's terminal.
+If the dashboard isn't running, spawns it in the background.
 """
 
 import json
 import os
 import subprocess
 import sys
+import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-SENDER = os.path.join(DIR, "hook_sender.py")
+DASHBOARD_URL = "http://127.0.0.1:8765"
+HOOK_URL = DASHBOARD_URL + "/hook"
 
 
 def main():
@@ -21,23 +23,39 @@ def main():
         if not raw.strip():
             return
 
-        # Validate JSON before spawning
-        json.loads(raw)
+        payload = json.loads(raw)
+        data = json.dumps(payload).encode("utf-8")
 
-        # Fire and forget — hand off to background process
-        kwargs = dict(
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        req = urllib.request.Request(
+            HOOK_URL,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        if sys.platform == "win32":
-            kwargs["creationflags"] = 0x00000008  # DETACHED_PROCESS
-        else:
-            kwargs["start_new_session"] = True
-
-        proc = subprocess.Popen([sys.executable, SENDER], **kwargs)
-        proc.stdin.write(raw.encode("utf-8"))
-        proc.stdin.close()
+        try:
+            urllib.request.urlopen(req, timeout=2)
+        except Exception:
+            # Dashboard probably not running — start it and retry once
+            if sys.platform == "win32":
+                subprocess.Popen(
+                    [sys.executable, os.path.join(DIR, "app.py")],
+                    creationflags=0x00000008,  # DETACHED_PROCESS
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.Popen(
+                    [sys.executable, os.path.join(DIR, "app.py")],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            import time
+            time.sleep(2)
+            try:
+                urllib.request.urlopen(req, timeout=2)
+            except Exception:
+                pass
     except Exception:
         pass
 
