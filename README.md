@@ -1,18 +1,18 @@
 # Claude Session Dashboard
 
-A minimal local dashboard for monitoring multiple Claude Code sessions. See which sessions are running, waiting for input, or need permission — all in one browser tab.
+A lightweight status monitor for multiple Claude Code sessions. See which sessions are running, waiting for input, or need permission — at a glance.
 
 ![Dashboard](https://img.shields.io/badge/local-only-blue) ![Python 3](https://img.shields.io/badge/python-3.x-green)
 
 ## Features
 
-- **Live session monitoring** — auto-refreshes every 2 seconds
-- **Attention highlighting** — sessions needing input or permission sort to the top with red highlight
+- **Live session monitoring** — polls every 2 seconds
+- **Attention highlighting** — sessions needing input or permission get a red border
+- **Toast notifications** — Windows desktop notifications when a session needs attention
 - **Auto-discovery** — finds existing Claude Code sessions on startup
-- **Auto-start** — dashboard launches automatically when a Claude session starts
-- **Editable labels** — click session names to add your own descriptions
-- **Find button** — flashes the session's terminal window in the taskbar (Windows)
-- **Hook-driven** — uses Claude Code's hook system for real-time status updates
+- **Session labels** — double-click a session name to rename it
+- **PWA installable** — runs as a standalone desktop window from Chrome
+- **Cross-machine sync** — see remote sessions via cloud sync (optional)
 
 ## Quick Start
 
@@ -22,33 +22,31 @@ cd claude-dashboard
 python start.py
 ```
 
-That's it. Opens at http://127.0.0.1:8765
+Opens at http://127.0.0.1:8765. Install as a PWA from Chrome for a standalone window.
 
-`start.py` handles everything: installs dependencies, configures Claude Code hooks, and starts the server.
-
-After initial setup, the dashboard auto-starts whenever a Claude Code session begins — no need to launch it manually.
+`start.py` installs dependencies and configures Claude Code hooks. After that, just run `python app.py` to start the dashboard.
 
 ## How It Works
 
-Claude Code supports [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) that run shell commands on events like session start, tool use, and notifications. This dashboard:
+Claude Code's [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) fire shell commands on events. This dashboard:
 
 1. Registers a hook receiver for key events (`SessionStart`, `Stop`, `Notification`, etc.)
-2. The hook receiver (`hook_receiver.py`) reads event JSON from stdin and POSTs it to the local Flask server
-3. The Flask server tracks session state in SQLite and serves a simple polling dashboard
+2. `hook_receiver.py` reads event JSON from stdin and POSTs it to the local Flask server
+3. Flask tracks session state in SQLite and serves a polling dashboard
+4. A background thread rescans `~/.claude/sessions/` every 15s to catch stale statuses
+
+Sessions run in your own terminal windows — the dashboard is status-only, no embedded terminals.
 
 ## Session States
 
-| Status | Meaning | Highlighted? |
-|--------|---------|:---:|
-| **Running** | Claude is actively working | No |
-| **Waiting for Input** | Claude finished and is waiting for your next prompt | Yes |
-| **Permission Needed** | Claude needs you to approve a tool use | Yes |
-| **Idle** | Dismissed / no recent activity | No |
-| **Done** | Session has ended | No (dimmed) |
+| Status | Color | Meaning |
+|--------|-------|---------|
+| **Working** | Blue | Claude is actively working |
+| **Waiting for Input** | Amber | Claude finished, waiting for your next prompt |
+| **Permission Needed** | Red (flashing) | Claude needs you to approve a tool use |
+| **Done** | Green | Session completed |
 
 ## Manual Setup
-
-If you prefer not to use `start.py`:
 
 ```bash
 pip install -r requirements.txt
@@ -59,11 +57,12 @@ python app.py            # starts the dashboard
 ## Requirements
 
 - Python 3.x
-- Flask
+- Windows (for toast notifications via winotify)
 - Claude Code with hooks support
 
 ## Tech Stack
 
 - **Flask** — local web server
 - **SQLite** — session and event storage
+- **winotify** — Windows toast notifications
 - **Vanilla HTML/CSS/JS** — no frontend frameworks
