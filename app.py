@@ -376,6 +376,28 @@ def send_toast(title, message):
     threading.Thread(target=_do_toast, daemon=True).start()
 
 
+_TOAST_DELAY = 10  # seconds to wait before sending toast (skip if session resumes)
+
+
+def _delayed_toast(session_id, title, message):
+    """Wait, then send toast only if the session still needs attention."""
+    def _check_and_toast():
+        time.sleep(_TOAST_DELAY)
+        try:
+            db = sqlite3.connect(DB_PATH)
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                "SELECT needs_attention FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            db.close()
+            if row and row["needs_attention"]:
+                send_toast(title, message)
+        except Exception:
+            pass
+
+    threading.Thread(target=_check_and_toast, daemon=True).start()
+
+
 # ---------------------------------------------------------------------------
 # Hook processing
 # ---------------------------------------------------------------------------
@@ -477,7 +499,7 @@ def process_hook(payload):
                 fields[k] = v.encode("utf-8", errors="replace").decode("utf-8")
         upsert_session(db, session_id, **fields)
 
-    # Toast notification for attention-needed events
+    # Toast notification for attention-needed events (delayed to avoid spam during rapid back-and-forth)
     if notify:
         repo = fields.get("repo", "")
         label = ""
@@ -487,7 +509,8 @@ def process_hook(payload):
             if not repo:
                 repo = row["repo"]
         title = label or repo or "Claude session"
-        send_toast(title, fields.get("last_message", "Needs attention"))
+        msg = fields.get("last_message", "Needs attention")
+        _delayed_toast(session_id, title, msg)
 
     return session_id
 
