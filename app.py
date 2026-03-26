@@ -109,6 +109,7 @@ def init_db():
                 session_id   TEXT PRIMARY KEY,
                 pid          INTEGER DEFAULT 0,
                 label        TEXT DEFAULT '',
+                label_manual INTEGER DEFAULT 0,
                 cwd          TEXT DEFAULT '',
                 repo         TEXT DEFAULT '',
                 status       TEXT DEFAULT 'running',
@@ -124,6 +125,10 @@ def init_db():
                 created_at REAL
             );
         """)
+        # Migrate: add label_manual column if missing
+        cols = [r[1] for r in db.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "label_manual" not in cols:
+            db.execute("ALTER TABLE sessions ADD COLUMN label_manual INTEGER DEFAULT 0")
 
     db.close()
 
@@ -405,6 +410,12 @@ def process_hook(payload):
         prompt = prompt.encode("utf-8", errors="replace").decode("utf-8")
         snippet = (prompt[:80] + "...") if len(prompt) > 80 else prompt
         fields["last_message"] = snippet or "Processing prompt..."
+        # Auto-label from first prompt only; never overwrite manual renames
+        if prompt:
+            existing = db.execute("SELECT label, label_manual FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+            if not existing or (not existing["label"] and not existing["label_manual"]):
+                label_text = (prompt[:60] + "...") if len(prompt) > 60 else prompt
+                fields["label"] = label_text
 
     elif hook_type == "SessionEnd":
         fields["status"] = "done"
@@ -470,7 +481,7 @@ if not SERVER_MODE:
         label = data.get("label", "")
         db = get_db()
         db.execute(
-            "UPDATE sessions SET label = ? WHERE session_id = ?", (label, session_id)
+            "UPDATE sessions SET label = ?, label_manual = 1 WHERE session_id = ?", (label, session_id)
         )
         db.commit()
         return jsonify({"ok": True})
