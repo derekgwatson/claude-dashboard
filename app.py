@@ -664,6 +664,17 @@ if SERVER_MODE:
     def api_vapid_key():
         return jsonify({"publicKey": VAPID_PUBLIC_KEY})
 
+    @app.route("/api/push/test", methods=["POST"])
+    def api_push_test():
+        """Send a test push notification to all subscribers."""
+        test_sessions = [{"session_id": "test", "label": "Test", "last_message": "This is a test notification"}]
+        threading.Thread(
+            target=_send_push_notifications,
+            args=(test_sessions, "test"),
+            daemon=True,
+        ).start()
+        return jsonify({"ok": True})
+
     @app.route("/api/push/subscribe", methods=["POST"])
     def api_push_subscribe():
         data = request.get_json(silent=True) or {}
