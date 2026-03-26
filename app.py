@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from flask import Flask, g, jsonify, render_template, request
+from flask import Flask, g, jsonify, redirect, render_template, request, session, url_for
 
 # ---------------------------------------------------------------------------
 # Mode detection (early, before conditional imports)
@@ -22,6 +22,7 @@ from flask import Flask, g, jsonify, render_template, request
 
 SERVER_MODE = "--server" in sys.argv or os.environ.get("SERVER_MODE", "") == "1"
 SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "")
+VIEWER_PASSWORD = os.environ.get("VIEWER_PASSWORD", "")
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_CLAIMS_EMAIL = os.environ.get("VAPID_CLAIMS_EMAIL", "mailto:admin@example.com")
@@ -32,6 +33,7 @@ if not SERVER_MODE:
     import sync_client
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", SYNC_TOKEN or "dev-key")
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(_DIR, "cloud.db" if SERVER_MODE else "dashboard.db")
@@ -45,21 +47,35 @@ CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 # ---------------------------------------------------------------------------
 
 if SERVER_MODE:
-    # Endpoints accessible without bearer token (PWA/push endpoints)
-    AUTH_EXEMPT_PATHS = {
-        "/", "/sw.js", "/api/health",
-        "/api/push/vapid-key", "/api/push/subscribe", "/api/push/unsubscribe",
-    }
+    # Paths that never require auth
+    AUTH_EXEMPT_PATHS = {"/login", "/api/health"}
+    # Paths that need viewer login (cookie) but not bearer token
+    VIEWER_PATHS_PREFIXES = ("/", "/sw.js", "/static/", "/api/push/")
 
     @app.before_request
     def check_auth():
-        if not SYNC_TOKEN:
+        path = request.path
+
+        # Fully exempt paths
+        if path in AUTH_EXEMPT_PATHS:
             return
-        if request.path in AUTH_EXEMPT_PATHS or request.path.startswith("/static/"):
-            return
+
+        # Bearer token auth (sync client API)
         auth = request.headers.get("Authorization", "")
-        if auth != f"Bearer {SYNC_TOKEN}":
-            return jsonify({"error": "unauthorized"}), 401
+        if auth == f"Bearer {SYNC_TOKEN}" and SYNC_TOKEN:
+            return
+
+        # Viewer paths: require cookie login
+        is_viewer_path = any(path.startswith(p) for p in VIEWER_PATHS_PREFIXES) or path == "/"
+        if is_viewer_path:
+            if not VIEWER_PASSWORD or session.get("authenticated"):
+                return
+            if path.startswith("/api/"):
+                return jsonify({"error": "unauthorized"}), 401
+            return redirect("/login")
+
+        # Everything else requires bearer token
+        return jsonify({"error": "unauthorized"}), 401
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +635,22 @@ if SERVER_MODE:
 
         db.commit()
         db.close()
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        if request.method == "POST":
+            password = request.form.get("password", "")
+            if password == VIEWER_PASSWORD:
+                session.permanent = True
+                session["authenticated"] = True
+                return redirect("/")
+            return render_template("login.html", error=True)
+        return render_template("login.html", error=False)
+
+    @app.route("/logout")
+    def logout():
+        session.clear()
+        return redirect("/login")
 
     @app.route("/")
     def index():
