@@ -22,6 +22,9 @@ from flask import Flask, g, jsonify, render_template, request
 
 SERVER_MODE = "--server" in sys.argv or os.environ.get("SERVER_MODE", "") == "1"
 SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "")
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
+VAPID_CLAIMS_EMAIL = os.environ.get("VAPID_CLAIMS_EMAIL", "mailto:admin@example.com")
 
 # Desktop-only imports (not available on Linux VPS)
 if not SERVER_MODE:
@@ -42,9 +45,17 @@ CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 # ---------------------------------------------------------------------------
 
 if SERVER_MODE:
+    # Endpoints accessible without bearer token (PWA/push endpoints)
+    AUTH_EXEMPT_PATHS = {
+        "/", "/sw.js", "/api/health",
+        "/api/push/vapid-key", "/api/push/subscribe", "/api/push/unsubscribe",
+    }
+
     @app.before_request
     def check_auth():
         if not SYNC_TOKEN:
+            return
+        if request.path in AUTH_EXEMPT_PATHS or request.path.startswith("/static/"):
             return
         auth = request.headers.get("Authorization", "")
         if auth != f"Bearer {SYNC_TOKEN}":
@@ -100,6 +111,18 @@ def init_db():
                 machine_id   TEXT PRIMARY KEY,
                 data         TEXT DEFAULT '{}',
                 updated_at   REAL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                endpoint     TEXT PRIMARY KEY,
+                keys_json    TEXT NOT NULL,
+                created_at   REAL DEFAULT 0,
+                fail_count   INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS push_sent_log (
+                session_id   TEXT,
+                machine_id   TEXT,
+                sent_at      REAL,
+                PRIMARY KEY (session_id, machine_id)
             );
         """)
     else:
@@ -303,8 +326,17 @@ _TOAST_COOLDOWN = 10  # seconds between toasts to avoid spam
 
 
 def send_toast(title, message):
-    """Send a Windows toast notification, rate-limited."""
+    """Send a Windows toast notification, rate-limited. Respects local_notifications setting."""
     global _last_toast_time
+
+    # Check if local notifications are disabled
+    try:
+        with open(SETTINGS_PATH) as f:
+            if not json.load(f).get("local_notifications", True):
+                return
+    except (OSError, json.JSONDecodeError):
+        pass
+
     now = time.time()
     if now - _last_toast_time < _TOAST_COOLDOWN:
         return
@@ -530,6 +562,103 @@ if not SERVER_MODE:
 if SERVER_MODE:
     import base64 as _b64
 
+    # Conditional import — pywebpush only needed on server
+    try:
+        from pywebpush import webpush, WebPushException
+        _HAS_WEBPUSH = True
+    except ImportError:
+        _HAS_WEBPUSH = False
+
+    def _send_push_notifications(attention_sessions, hostname):
+        """Send web push to all subscribers for attention-needing sessions."""
+        if not _HAS_WEBPUSH or not VAPID_PRIVATE_KEY:
+            return
+
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        subscriptions = db.execute("SELECT endpoint, keys_json FROM push_subscriptions").fetchall()
+        if not subscriptions:
+            db.close()
+            return
+
+        for session in attention_sessions:
+            label = session.get("label") or "Claude session"
+            message = session.get("last_message") or "Needs attention"
+            payload = json.dumps({
+                "title": f"{label} ({hostname})",
+                "body": message,
+                "tag": session["session_id"],
+                "data": {"session_id": session["session_id"]},
+            })
+
+            for sub in subscriptions:
+                sub_info = {
+                    "endpoint": sub["endpoint"],
+                    "keys": json.loads(sub["keys_json"]),
+                }
+                try:
+                    webpush(
+                        subscription_info=sub_info,
+                        data=payload,
+                        vapid_private_key=VAPID_PRIVATE_KEY,
+                        vapid_claims={"sub": VAPID_CLAIMS_EMAIL},
+                    )
+                    db.execute(
+                        "UPDATE push_subscriptions SET fail_count = 0 WHERE endpoint = ?",
+                        (sub["endpoint"],),
+                    )
+                except Exception as e:
+                    resp_code = getattr(getattr(e, "response", None), "status_code", None)
+                    if resp_code in (404, 410):
+                        db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (sub["endpoint"],))
+                    else:
+                        db.execute(
+                            "UPDATE push_subscriptions SET fail_count = fail_count + 1 WHERE endpoint = ?",
+                            (sub["endpoint"],),
+                        )
+
+        db.commit()
+        db.close()
+
+    @app.route("/")
+    def index():
+        return render_template("index.html")
+
+    @app.route("/sw.js")
+    def service_worker():
+        return app.send_static_file("sw.js")
+
+    @app.route("/api/push/vapid-key")
+    def api_vapid_key():
+        return jsonify({"publicKey": VAPID_PUBLIC_KEY})
+
+    @app.route("/api/push/subscribe", methods=["POST"])
+    def api_push_subscribe():
+        data = request.get_json(silent=True) or {}
+        sub = data.get("subscription", {})
+        endpoint = sub.get("endpoint", "")
+        keys = sub.get("keys", {})
+        if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+            return jsonify({"error": "invalid subscription"}), 400
+        db = get_db()
+        db.execute(
+            "INSERT INTO push_subscriptions (endpoint, keys_json, created_at, fail_count) "
+            "VALUES (?, ?, ?, 0) ON CONFLICT(endpoint) DO UPDATE SET keys_json=excluded.keys_json, fail_count=0",
+            (endpoint, json.dumps(keys), time.time()),
+        )
+        db.commit()
+        return jsonify({"ok": True})
+
+    @app.route("/api/push/unsubscribe", methods=["DELETE"])
+    def api_push_unsubscribe():
+        data = request.get_json(silent=True) or {}
+        endpoint = data.get("endpoint", "")
+        if endpoint:
+            db = get_db()
+            db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+            db.commit()
+        return jsonify({"ok": True})
+
     @app.route("/api/health")
     def api_health():
         return jsonify({"ok": True})
@@ -577,7 +706,40 @@ if SERVER_MODE:
                  t.get("created_at", 0), t.get("updated_at", now)),
             )
 
+        # Process session state for push notifications
+        sessions = data.get("sessions", [])
+        newly_attention = []
+        now = time.time()
+
+        for s in sessions:
+            if s.get("needs_attention"):
+                row = db.execute(
+                    "SELECT sent_at FROM push_sent_log WHERE session_id = ? AND machine_id = ?",
+                    (s["session_id"], machine_id),
+                ).fetchone()
+                if not row or (now - row["sent_at"]) > 300:  # 5 min cooldown
+                    newly_attention.append(s)
+                    db.execute(
+                        "INSERT INTO push_sent_log (session_id, machine_id, sent_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT DO UPDATE SET sent_at = excluded.sent_at",
+                        (s["session_id"], machine_id, now),
+                    )
+            else:
+                db.execute(
+                    "DELETE FROM push_sent_log WHERE session_id = ? AND machine_id = ?",
+                    (s["session_id"], machine_id),
+                )
+
         db.commit()
+
+        # Fire push notifications in background thread
+        if newly_attention:
+            threading.Thread(
+                target=_send_push_notifications,
+                args=(newly_attention, hostname),
+                daemon=True,
+            ).start()
+
         return jsonify({"ok": True, "synced": len(term_list)})
 
     @app.route("/api/terminals")

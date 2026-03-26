@@ -20,6 +20,7 @@ claude-dashboard/
 ├── start.py            # One-command setup: installs deps, configures hooks, starts server
 ├── setup_hooks.py      # Merges hook config into ~/.claude/settings.json
 ├── sync_client.py      # Background thread: pushes session state to cloud server
+├── generate_vapid_keys.py  # One-time VAPID key pair generation for Web Push
 ├── templates/
 │   └── index.html      # Single-page dashboard
 └── static/
@@ -67,6 +68,20 @@ Claude sessions can't be resumed across machines (transcripts are project-path-s
 2. The sync client reads the summary from the transcript `.jsonl` and pushes it to the cloud DB
 3. On another machine, remote terminals show in the sidebar
 
+### Web Push Notifications (Mobile)
+
+Push notifications to phone/tablet when a session needs attention:
+1. `sync_client.py` pushes session state (including `needs_attention`) to cloud server every 30s
+2. Cloud server detects newly attention-needing sessions (5-minute dedup cooldown per session)
+3. Server sends Web Push via `pywebpush` to all subscribed devices
+4. Service worker shows native notification on phone; tapping opens the PWA
+
+**Setup:** Run `python generate_vapid_keys.py` once, set `VAPID_PRIVATE_KEY`, `VAPID_PUBLIC_KEY`, and `VAPID_CLAIMS_EMAIL` as env vars on the server. The PWA bell button in the status bar handles subscription.
+
+**Dedup layers:** Server-side 5-min cooldown per session, browser-side `tag` field replaces duplicate notifications.
+
+**Local notifications:** Can be disabled via `local_notifications: false` in settings.json when push notifications make them redundant.
+
 ## Data Model
 
 **sessions** — one row per Claude Code session (from hooks)
@@ -77,6 +92,12 @@ Claude sessions can't be resumed across machines (transcripts are project-path-s
 
 **cloud_terminals** (server mode only) — synced terminal state from all machines
 - `(tid, machine_id)` (PK), `label`, `cwd`, `task`, `command`, `launch_claude`, `scrollback`, `compact_summary`, `created_at`, `updated_at`, `alive`
+
+**push_subscriptions** (server mode only) — Web Push subscription endpoints
+- `endpoint` (PK), `keys_json`, `created_at`, `fail_count`
+
+**push_sent_log** (server mode only) — dedup log for push notifications
+- `(session_id, machine_id)` (PK), `sent_at`
 
 SQLite database at `dashboard.db` (gitignored). Created automatically on first run.
 
@@ -90,6 +111,9 @@ SQLite database at `dashboard.db` (gitignored). Created automatically on first r
 | PUT | `/api/sessions/<id>/label` | Update session label |
 | GET | `/api/settings` | Get dashboard settings |
 | PUT | `/api/settings` | Update dashboard settings |
+| GET | `/api/push/vapid-key` | VAPID public key for push subscription |
+| POST | `/api/push/subscribe` | Register a push subscription |
+| DELETE | `/api/push/unsubscribe` | Remove a push subscription |
 
 ## Setup
 

@@ -133,10 +133,33 @@ def _push():
             "compact_summary": compact_summary,
         })
 
+    # Also send session state so the server can trigger push notifications
+    session_list = []
+    try:
+        db2 = sqlite3.connect(_db_path)
+        db2.row_factory = sqlite3.Row
+        session_rows = db2.execute(
+            "SELECT session_id, status, needs_attention, label, repo, last_message, cwd "
+            "FROM sessions WHERE status != 'done'"
+        ).fetchall()
+        db2.close()
+        for row in session_rows:
+            session_list.append({
+                "session_id": row["session_id"],
+                "status": row["status"],
+                "needs_attention": row["needs_attention"],
+                "label": row["label"] or row["repo"] or "",
+                "last_message": row["last_message"] or "",
+                "cwd": row["cwd"] or "",
+            })
+    except Exception:
+        pass
+
     payload = {
         "machine_id": _machine_id,
         "hostname": _hostname,
         "terminals": term_list,
+        "sessions": session_list,
     }
 
     resp = requests.post(

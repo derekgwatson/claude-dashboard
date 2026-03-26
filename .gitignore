@@ -1,5 +1,7 @@
 dashboard.db
+cloud.db
 settings.json
+.env
 scrollback/
 __pycache__/
 *.pyc

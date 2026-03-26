@@ -204,6 +204,73 @@ async function loadRemoteTerminals() {
 }
 
 // ---------------------------------------------------------------------------
+// Push notifications
+// ---------------------------------------------------------------------------
+
+const pushToggle = document.getElementById("push-toggle");
+let pushSubscription = null;
+
+async function initPush() {
+    if (!("PushManager" in window) || !("serviceWorker" in navigator)) return;
+
+    pushToggle.style.display = "flex";
+
+    const reg = await navigator.serviceWorker.ready;
+    pushSubscription = await reg.pushManager.getSubscription();
+    updatePushUI();
+
+    pushToggle.addEventListener("click", togglePush);
+}
+
+function updatePushUI() {
+    if (pushSubscription) {
+        pushToggle.classList.add("subscribed");
+        pushToggle.title = "Push notifications enabled (click to disable)";
+    } else {
+        pushToggle.classList.remove("subscribed");
+        pushToggle.title = "Enable push notifications";
+    }
+}
+
+async function togglePush() {
+    if (pushSubscription) {
+        await fetch("/api/push/unsubscribe", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ endpoint: pushSubscription.endpoint }),
+        });
+        await pushSubscription.unsubscribe();
+        pushSubscription = null;
+    } else {
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") return;
+
+        const resp = await fetch("/api/push/vapid-key");
+        const { publicKey } = await resp.json();
+
+        const reg = await navigator.serviceWorker.ready;
+        pushSubscription = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(publicKey),
+        });
+
+        await fetch("/api/push/subscribe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ subscription: pushSubscription.toJSON() }),
+        });
+    }
+    updatePushUI();
+}
+
+function urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const rawData = atob(base64);
+    return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
@@ -213,3 +280,5 @@ setInterval(pollSessions, 2000);
 loadSyncStatus();
 loadRemoteTerminals();
 setInterval(loadRemoteTerminals, 30000);
+
+initPush();

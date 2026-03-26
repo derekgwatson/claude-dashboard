@@ -284,6 +284,23 @@ body {
     cursor: help;
 }
 
+/* Push notification toggle */
+
+.push-btn {
+    background: none;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    color: #b1bac4;
+    cursor: pointer;
+    padding: 2px 6px;
+    display: flex;
+    align-items: center;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.push-btn:hover { color: #e6edf3; border-color: #58a6ff; }
+.push-btn.subscribed { color: #3fb950; border-color: #3fb950; }
+
 /* Scrollbar styling */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
